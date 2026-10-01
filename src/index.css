@@ -1,1 +1,144 @@
 @import "tailwindcss";
+
+/* =====================================================================
+   D3 — Let's-Go-style battle scene FX (docs/battle-scene-spec.md §2).
+   One namespaced bs-* block: each keyframe animates the element that
+   already carries the class's base styles, so the class is a one-shot
+   add/remove toggle (the page schedules it per envelope transition).
+   No new animation library; static PokeAPI PNGs + CSS motion only.
+   ===================================================================== */
+
+/* bs-attack — attacker plate lunge toward the foe (spec §2.1):
+   0 -> 4px travel (the --bs-dir var flips the direction per side:
+   +1 yours, -1 foe, set inline on the plate) -> 0; a 100ms white
+   flash on the sprite box rides along. 200ms. */
+@keyframes bs-attack {
+    0%   { transform: translateX(0); }
+    40%  { transform: translateX(calc(4px * var(--bs-dir, 1))); }
+    100% { transform: translateX(0); }
+}
+@keyframes bs-attack-flash {
+    0%   { filter: none; }
+    50%  { filter: brightness(3); }
+    100% { filter: none; }
+}
+.bs-attack {
+    animation: bs-attack 200ms ease-in-out 1;
+}
+.bs-attack > .bs-sprite-box {
+    animation: bs-attack-flash 100ms linear 1 50ms;
+}
+
+/* bs-hit — target plate shake ±3px + a blue-50 -> white ×2 sprite-box
+   background flicker. 150ms. The HP drain itself is the existing 500ms
+   width transition on HpBar's fill (no keyframe, spec §2.1). */
+@keyframes bs-hit-shake {
+    0%   { transform: translateX(0); }
+    25%  { transform: translateX(-3px); }
+    50%  { transform: translateX(3px); }
+    75%  { transform: translateX(-3px); }
+    100% { transform: translateX(0); }
+}
+@keyframes bs-hit-flicker {
+    0%   { background-color: #eff6ff; }
+    33%  { background-color: #ffffff; }
+    66%  { background-color: #eff6ff; }
+    83%  { background-color: #ffffff; }
+    100% { background-color: #eff6ff; }
+}
+.bs-hit {
+    animation: bs-hit-shake 150ms ease-in-out 1;
+}
+.bs-hit > .bs-sprite-box {
+    animation: bs-hit-flicker 150ms linear 1;
+}
+
+/* bs-switch-in — the incoming plate (keyed, so it is a fresh mount):
+   opacity 0->1, 8px rise (yours down-to-up; the foe's row is mirrored
+   via its inline direction, so the same -8px start reads upward for
+   the caller and downward for the foe when --bs-dir flips it), scale
+   0.95->1. 300ms. */
+@keyframes bs-switch-in {
+    0%   { opacity: 0; transform: translateY(calc(8px * var(--bs-dir, 1))); scale: 0.95; }
+    100% { opacity: 1; transform: translateY(0); scale: 1; }
+}
+.bs-switch-in {
+    animation: bs-switch-in 300ms ease-out 1 both;
+}
+
+/* bs-faint — grayscale 0->1, opacity 1->0.5, a small 6px settle,
+   forwards fill: on class removal the plate is already fainted (its
+   sprite box carries the opacity-50 + grayscale rest style), so the
+   animation ends ON that rest style and stays; the spec §2.1 6px
+   settle reads as the motion, not as a persistent offset. 300ms. */
+@keyframes bs-faint {
+    0%   { filter: none; opacity: 1; transform: translateY(0); }
+    100% { filter: grayscale(1); opacity: 0.5; transform: translateY(0); }
+}
+.bs-faint {
+    animation: bs-faint 300ms ease-in 1 forwards;
+}
+
+/* bs-turn-pulse — the turn pill: scale 1->1.02->1 over 200ms. The
+   arena border pulse rides the same class on the plate (a neutral-200
+   -> blue-200 border flash). */
+@keyframes bs-turn-pulse {
+    0%   { transform: scale(1); }
+    50%  { transform: scale(1.02); }
+    100% { transform: scale(1); }
+}
+@keyframes bs-turn-pulse-border {
+    0%   { border-color: #e5e5e5; }
+    50%  { border-color: #bfdbfe; }
+    100% { border-color: #e5e5e5; }
+}
+.bs-turn-pulse {
+    animation: bs-turn-pulse 200ms ease-in-out 1;
+}
+.bs-turn-pulse-plate {
+    animation: bs-turn-pulse-border 200ms ease-in-out 1;
+}
+
+/* bs-status — a status chip that just appeared: amber-100 ->
+   amber-400 x2 background flicker, settling back on the chip's base
+   amber-100 so the class-removal pop is invisible. 300ms.
+   Removals are silent (the chip just unmounts). */
+@keyframes bs-status {
+    0%   { background-color: #fef3c7; }
+    25%  { background-color: #fbbf24; }
+    50%  { background-color: #fef3c7; }
+    75%  { background-color: #fbbf24; }
+    100% { background-color: #fef3c7; }
+}
+.bs-status-chip.bs-status {
+    animation: bs-status 300ms linear 1;
+}
+
+/* §2.4 — reduced motion: every bs-* keyframe collapses to 0s (the
+   classes remain harmless), the HP fill transition goes instant, and
+   the busy spinners render static. State stays fully readable via the
+   log + progressbar semantics + labels. */
+@media (prefers-reduced-motion: reduce) {
+    .bs-attack,
+    .bs-hit,
+    .bs-switch-in,
+    .bs-faint,
+    .bs-turn-pulse,
+    .bs-turn-pulse-plate,
+    .bs-status,
+    .bs-attack > .bs-sprite-box,
+    .bs-hit > .bs-sprite-box {
+        animation-duration: 0s !important;
+    }
+    /* HP drain: instant. The fill is the ONLY element carrying the
+       transition-[width] animation; a stable .bs-hp-fill hook makes the
+       override precise without touching the bar's value semantics. */
+    .bs-hp-fill {
+        transition: none !important;
+    }
+    /* The busy spinner's animate-spin is suppressed by the same media
+       query reaching Tailwind's utilities: force every spin static. */
+    .animate-spin {
+        animation: none !important;
+    }
+}

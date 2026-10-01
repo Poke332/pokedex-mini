@@ -6,6 +6,7 @@ import { startBattle, sendChoice, getBattleState } from "../utils/simService";
 import { getRecordsForSpecies } from "../utils/showdownData";
 import { loadDexMap } from "../utils/battleSprites";
 import { isDisplayLogLine, parseLogLine, reconcileLog } from "../utils/battleLog";
+import { fxEvents, fxClass, fxDuration } from "../utils/battleFx";
 import { getTypeDamageRelations } from "../utils/api";
 import TeamPreviewGrid from "../components/battle/TeamPreviewGrid";
 import PokemonPlate from "../components/battle/PokemonPlate";
@@ -96,6 +97,98 @@ export default function BattlePage() {
     const toastTimer = useRef(null);
     const startTimer = useRef(null);
     const laneKey = speciesIds.join(",");
+
+    // D3 — scene FX scheduling (docs/battle-scene-spec.md §2.3). The one-shot
+    // `bs-*` classes are toggled on the DOM directly (the spec §2.3 one-shot
+    // rule: "add the class on the next frame, then setTimeout(duration)
+    // removes it"). The plate roots + pill have STATIC className props, so
+    // React's re-render on an envelope commit does NOT rewrite the
+    // attribute — an imperatively-added class survives until its timer
+    // removes it. Only a species-key change (a switch) remounts a plate,
+    // which is exactly when we want the animation to restart. A fresh
+    // envelope supersedes any in-flight removals (rule 4); re-adding a
+    // class that is still live is a no-op, so races cannot double-fire.
+    const foePlateRef = useRef(null);
+    const yourPlateRef = useRef(null);
+    const foeChipRef = useRef(null);
+    const yourChipRef = useRef(null);
+    const pillRef = useRef(null);
+    const prevEnvRef = useRef(null);   // previous envelope (FX diff base)
+    const logRef = useRef([]);         // mirrors `log` — the PRE-log at apply time
+    const pendingFxRef = useRef([]);   // in-flight one-shot removal timers
+    useEffect(() => { logRef.current = log; }, [log]);
+    // Clean up any still-pending FX removals on unmount (a battle can end
+    // while a window is open; timers must not fire on dead refs).
+    useEffect(() => () => { pendingFxRef.current.forEach(clearTimeout); }, []);
+
+    // D3: fire one scene FX event. `kind`+`side` select the target; `offset`
+    // defers the class add (spec §2.1 choreography: pulse(0) -> your
+    // attack(0-200) -> foe hit@150 + HP drain -> foe attack@200 -> your hit;
+    // faints last). turnPulse adds the pill scale + both plates' border flash
+    // on the same beat.
+    const playEvent = useCallback((ev) => {
+        const cls = fxClass(ev.kind);
+        const fire = () => {
+            const target = ev.kind === "status"
+                ? (ev.side === "foe" ? foeChipRef.current : yourChipRef.current)
+                : (ev.side === "foe" ? foePlateRef.current : yourPlateRef.current);
+            if (!target) return;
+            target.classList.add(cls);
+            pendingFxRef.current.push(
+                setTimeout(() => target.classList.remove(cls), fxDuration(ev.kind)),
+            );
+        };
+        const run = () => {
+            if (ev.kind === "turnPulse") {
+                if (pillRef.current) {
+                    pillRef.current.classList.add("bs-turn-pulse");
+                    pendingFxRef.current.push(
+                        setTimeout(() => pillRef.current.classList.remove("bs-turn-pulse"), fxDuration("turnPulse")),
+                    );
+                }
+                for (const plate of [foePlateRef.current, yourPlateRef.current]) {
+                    if (!plate) continue;
+                    plate.classList.add("bs-turn-pulse-plate");
+                    pendingFxRef.current.push(
+                        setTimeout(() => plate.classList.remove("bs-turn-pulse-plate"), fxDuration("turnPulse")),
+                    );
+                }
+                return;
+            }
+            fire();
+        };
+        // "Add the class on the next frame" — schedule the add on rAF so the
+        // offset-0 events fire AFTER React commits the (possibly freshly
+        // remounted) plate; the rest is a one-shot CSS animation.
+        requestAnimationFrame(() => {
+            if (ev.offset) setTimeout(run, ev.offset);
+            else run();
+        });
+    }, []);
+
+    // D3: diff this envelope against the previous one and schedule the FX.
+    // `newLines` are ONLY the log lines this envelope added (reconcileLog's
+    // tail) — a notYourTurn resync that re-ships its last slice overlaps the
+    // accumulated log, yields an empty new-lines diff, and re-fires nothing.
+    const scheduleFx = useCallback((env, newLines) => {
+        // Supersede in-flight removals (spec §2.3 rule 4): a new envelope
+        // cancels any pending timer so the scene restarts from commit time.
+        pendingFxRef.current.forEach(clearTimeout);
+        pendingFxRef.current = [];
+        const events = fxEvents(prevEnvRef.current, env, newLines);
+        // Dev QA bridge (D3 live-verify): record exactly which events the
+        // envelope diff scheduled, for the completion log + D4 assertion.
+        if (typeof window !== "undefined" && window.__d3sched) {
+            for (const ev of events) {
+                window.__d3sched.push({
+                    kind: ev.kind,
+                    side: ev.side || "all",
+                    offset: ev.offset,
+                });
+            }
+        }
+        for (const ev of events) playEvent(ev);
+    }, [playEvent]);
     // D1 (fix 4): the mount-time create call runs before the data lane lands,
     // but the retry path (and every later create) must resolve form-gated
     // species with the CURRENT records. A ref synced in an effect reads the
@@ -164,7 +257,16 @@ export default function BattlePage() {
             }
             setBattleId(res.envelope.battleId);
             setEnvelope(res.envelope);
-            setLog(res.envelope.log || []);
+            const freshLog = res.envelope.log || [];
+            setLog(freshLog);
+            // D3: a fresh battle is a fresh FX/log baseline — the teampreview
+            // envelope's actives are absent, so the next (battle) envelope's
+            // first-appear animation is correct, and a stale previous-battle
+            // tail can never bleed into the new battle's diff.
+            logRef.current = freshLog;
+            prevEnvRef.current = null;
+            pendingFxRef.current.forEach(clearTimeout);
+            pendingFxRef.current = [];
             // The first envelope's state is "teampreview" (C2 §3.1) — the
             // lead-pick step; an already-over battle skips straight to end.
             setPhase(res.envelope.battleOver ? "over" : "preview");
@@ -194,7 +296,21 @@ export default function BattlePage() {
         // matching tail and drops exact consecutive duplicates, so re-apply
         // can never double the display rows. startNewBattle above is the
         // only reset point.
-        if (env.log?.length) setLog((prev) => reconcileLog(prev, env.log));
+        const nextLog = env.log?.length
+            ? reconcileLog(logRef.current, env.log)
+            : logRef.current;
+        // D3 (spec §2.3): the PRE-log is captured BEFORE updating the mirror —
+        // the diff (nextLog minus the pre-tail) is exactly THIS envelope's new
+        // lines. A notYourTurn resync that re-ships its last slice overlaps the
+        // pre-tail and yields an empty diff, so already-played lines never
+        // re-fire FX.
+        const preLog = logRef.current;
+        logRef.current = nextLog; // keep the mirror synchronous (two applies
+                                  // in flight must never diff against stale tails)
+        setLog(nextLog);
+        const newLines = nextLog.slice(preLog.length);
+        scheduleFx(env, newLines);
+        prevEnvRef.current = env;
         const cr = env.choiceRequest || {};
         // A new foe can appear (switch on the opposing side) — widen the lane.
         if (env.foe?.species) {
@@ -208,7 +324,7 @@ export default function BattlePage() {
         } else {
             setPhase("battle");
         }
-    }, []);
+    }, [scheduleFx]);
 
     const submitChoice = useCallback(async (choice) => {
         if (busy || !battleId) return;
@@ -497,17 +613,30 @@ export default function BattlePage() {
                 {(phase === "battle" || phase === "over") && (
                     <div className="grid w-full grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
                         <div className="flex min-w-0 flex-col gap-4">
-                            {/* Turn strip — sticky on mobile (C1 §3.3) */}
-                            <div className="sticky top-0 z-10 flex items-center gap-3 rounded-lg border border-neutral-200 bg-white px-4 py-3 lg:static">
-                                {busy ? (
-                                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-800 border-t-transparent" aria-hidden="true" />
-                                ) : null}
-                                <p className="text-sm font-semibold text-neutral-900">
-                                    Turn {choiceCount}
-                                    {turnLabel ? <span className="font-medium text-neutral-500"> · {turnLabel}</span> : null}
-                                </p>
+                            {/* Turn surface (D3 §1.2): the centered turn pill,
+                                sticky at both breakpoints — on mobile the
+                                two-row strip (pill + last-log row) pins at
+                                top-0 while the bench/controls scroll; on
+                                desktop the card chrome drops and the pill
+                                row pins at top-4 over the tall arena. The
+                                pill is the bs-turn-pulse target (§2.1). */}
+                            <div className="sticky top-0 z-10 flex flex-col items-center gap-2 rounded-lg border border-neutral-200 bg-white px-4 py-3 lg:top-4 lg:rounded-none lg:border-0 lg:bg-transparent lg:px-0 lg:py-0">
+                                <div className="flex items-center gap-2">
+                                    {busy ? (
+                                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-800 border-t-transparent" aria-hidden="true" />
+                                    ) : null}
+                                    <span
+                                        ref={pillRef}
+                                        className="rounded-full bg-blue-800 px-3 py-1 text-xs font-semibold text-white"
+                                    >
+                                        Turn {choiceCount}
+                                    </span>
+                                    {turnLabel ? (
+                                        <span className="text-xs font-medium text-neutral-500">{turnLabel}</span>
+                                    ) : null}
+                                </div>
                                 {/* Mobile-only last-log line (C1 §3.3) */}
-                                <p className="min-w-0 flex-1 truncate text-right text-xs text-neutral-500 lg:hidden">
+                                <p className="min-w-0 truncate text-center text-xs text-neutral-500 lg:hidden">
                                     {lastLogLine}
                                 </p>
                             </div>
@@ -531,9 +660,27 @@ export default function BattlePage() {
                                 </div>
                             ) : (
                                 <>
-                                    {/* Arena: foe plate then your plate (C1 §3.3 mobile order) */}
-                                    <PokemonPlate mon={withMeta(foeMon)} side="foe" dexMap={dexMap} />
-                                    <PokemonPlate mon={withMeta(activeMon)} side="yours" dexMap={dexMap} />
+                                    {/* Arena: foe plate then your plate (C1 §3.3 mobile order).
+                                        D3 §2.2: the plates mount on the active species —
+                                        a switch unmounts the outgoing mon and remounts the
+                                        incoming one, which is what makes bs-switch-in a
+                                        clean mount-animation. */}
+                                    <PokemonPlate
+                                        key={`foe:${foeMon?.species || "none"}`}
+                                        mon={withMeta(foeMon)}
+                                        side="foe"
+                                        dexMap={dexMap}
+                                        rootRef={foePlateRef}
+                                        statusChipRef={foeChipRef}
+                                    />
+                                    <PokemonPlate
+                                        key={`yours:${activeMon?.species || "none"}`}
+                                        mon={withMeta(activeMon)}
+                                        side="yours"
+                                        dexMap={dexMap}
+                                        rootRef={yourPlateRef}
+                                        statusChipRef={yourChipRef}
+                                    />
 
                                     {controlCard}
                                 </>
