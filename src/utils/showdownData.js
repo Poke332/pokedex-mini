@@ -20,17 +20,22 @@
 
 const DATA_BASE = "https://play.pokemonshowdown.com/data";
 
-// The four live-served source files. pokedex/moves/learnsets are plain JSON;
-// items is a CommonJS object-literal dump (exports.BattleItems = {...};).
+// The five live-served source files. pokedex/moves/learnsets are plain JSON;
+// items + abilities are CommonJS object-literal dumps (exports.X = {...};).
 // NOTE: per-gen override files under data/mods/<gen>/* are NOT served by the
 // live host (all 404). Per-generation legality is instead encoded inline in
-// learnsets.json as generation-prefixed tokens ("9M", "8L30", ...), so a single
-// master fetch covers every generation.
+// learnsets.json as generation-prefixed tokens ("9M", "8L30", ...), so a
+// single master fetch covers every generation.
 const DATA_SOURCES = {
     pokedex: `${DATA_BASE}/pokedex.json`,
     moves: `${DATA_BASE}/moves.json`,
     learnsets: `${DATA_BASE}/learnsets.json`,
     items: `${DATA_BASE}/items.js`,
+    // P2 (fix 2): ability effect text. The data host DOES publish
+    // data/abilities.js (exports.BattleAbilities — each entry carries
+    // shortDesc/desc); natures.ts 404s so the nature +/- table is the static
+    // in-repo natures.js instead.
+    abilities: `${DATA_BASE}/abilities.js`,
 };
 
 // The 25 in-game natures (Showdown `data/natures.ts`). Natures are not
@@ -77,18 +82,36 @@ export const parseCommonJSDump = (text) => {
     return mod.exports;
 };
 
-// Fetch all four sources in parallel and normalize them into a raw index.
+// Fetch all five sources in parallel and normalize them into a raw index.
 // `fetchFn` is injectable for tests; defaults to the global fetch.
+// The four core sources (pokedex/moves/learnsets/items) are REQUIRED — the lane
+// cannot build legal sets without them. The fifth (abilities) is ENRICHMENT
+// (per-ability effect text): its fetch is tolerated, so a failed/absent
+// abilities.js degrades to an empty dump and the record still renders.
 export const fetchShowdownData = async (fetchFn = globalThis.fetch) => {
-    const [pokedex, moves, learnsets, itemsText] = await Promise.all([
+    const [pokedex, moves, learnsets, itemsText, abilitiesText] = await Promise.all([
         fetchFn(DATA_SOURCES.pokedex).then((r) => r.json()),
         fetchFn(DATA_SOURCES.moves).then((r) => r.json()),
         fetchFn(DATA_SOURCES.learnsets).then((r) => r.json()),
         fetchFn(DATA_SOURCES.items).then((r) => r.text()),
+        fetchFn(DATA_SOURCES.abilities)
+            .then((r) => r.text())
+            .catch(() => ""), // additive: failure degrades to no descriptions
     ]);
     const itemsExport = parseCommonJSDump(itemsText);
     const items = itemsExport && itemsExport.BattleItems ? itemsExport.BattleItems : itemsExport;
-    return { pokedex, moves, learnsets, items };
+    let abilities = {};
+    if (abilitiesText) {
+        try {
+            const abilitiesExport = parseCommonJSDump(abilitiesText);
+            abilities = abilitiesExport && abilitiesExport.BattleAbilities
+                ? abilitiesExport.BattleAbilities
+                : abilitiesExport || {};
+        } catch {
+            abilities = {}; // a malformed/non-dump body must not break the lane
+        }
+    }
+    return { pokedex, moves, learnsets, items, abilities };
 };
 
 // ---------------------------------------------------------------------------
@@ -99,7 +122,7 @@ export const fetchShowdownData = async (fetchFn = globalThis.fetch) => {
 // not in the pokedex. A learnset gap (forme not listed in learnsets.json) falls
 // back to the base species' learnset via pokedex `baseSpecies`.
 export const buildSpeciesRecord = (data, speciesId, formatId) => {
-    const { pokedex, moves, learnsets, items } = data;
+    const { pokedex, moves, learnsets, items, abilities: abilityDump } = data;
     const spKey = toID(speciesId);
     const species = pokedex[spKey];
     if (!species) return null;
@@ -207,13 +230,40 @@ export const buildSpeciesRecord = (data, speciesId, formatId) => {
         gatedForms = found.length ? found : null;
     }
 
+    // P2 (fix 1): item display names + effect text, keyed by item id. Built over
+    // the standard pool (itemPool). The wire value stays the Showdown id; only
+    // display changes. `name` comes from the items dump (fallback: the id with
+    // its first letter raised). `effect` prefers the dump's shortDesc, then desc.
+    const itemNames = {};
+    const itemEffects = {};
+    for (const id of itemPool) {
+        if (!id) { itemNames[""] = ""; itemEffects[""] = ""; continue; }
+        const it = items[id] || {};
+        itemNames[id] = it.name || id.charAt(0).toUpperCase() + id.slice(1);
+        itemEffects[id] = it.shortDesc || it.desc || "";
+    }
+
+    // P2 (fix 2): ability effect text for this species' ability pool, keyed by
+    // ability id. The lane pokedex dump has no ability description, so this is
+    // enriched from the same-host abilities.js dump (BattleAbilities). Unknown /
+    // dump-absent abilities map to "" (the editor hides the line, never a wrong
+    // one). Additive: the record still renders without this source.
+    const abilityDescriptions = {};
+    for (const ab of abilities) {
+        const entry = abilityDump ? abilityDump[ab.id] : null;
+        abilityDescriptions[ab.id] = entry ? entry.shortDesc || entry.desc || "" : "";
+    }
+
     return {
         species: species.name,
         dexNum: species.num ?? null,
         types: (species.types || []).map((t) => String(t).toLowerCase()),
         abilities,
+        abilityDescriptions,
         moves: movesList,
         items: itemPool,
+        itemNames,
+        itemEffects,
         levelRange: LEVEL_RANGE,
         natures: ALL_NATURES.slice(),
         isMega,
@@ -256,6 +306,8 @@ export const loadShowdownIndex = (fetchFn = globalThis.fetch) => {
             if (!data || !data.pokedex || !data.moves || !data.learnsets || !data.items) {
                 throw new Error("showdown index: incomplete fetch");
             }
+            // `abilities` is additive enrichment — an empty {} is fine.
+            if (!data.abilities) data.abilities = {};
             return data;
         }).catch((err) => {
             indexPromise = null; // allow retry after a failure

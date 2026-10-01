@@ -106,8 +106,8 @@ test("buildTeam drops empty slots and normalizes the rest", () => {
 });
 
 test("invariants: EV caps and the 18-type metadata list", () => {
-    assert.equal(MAX_EV, 252);
-    assert.equal(EV_TOTAL_CAP, 252);
+    assert.equal(MAX_EV, 252, "per-stat clamp stays 252");
+    assert.equal(EV_TOTAL_CAP, 510, "in-game total cap is 510 (not 252)");
     assert.equal(TYPE_IDS.length, 18);
     assert.ok(TYPE_IDS.includes("fairy"));
     assert.ok(!TYPE_IDS.includes("steelx"));

@@ -33,10 +33,12 @@ export const fullIvs = () => ({ hp: 31, atk: 31, def: 31, spa: 31, spd: 31, spe:
 export const MAX_EV = 252;
 
 /**
- * The C1 soft cap on the total EV budget (advisory hint only — OD-3: the
- * service validator is the authority; the UI never hard-blocks at this total).
+ * The in-game total-EV cap: a set may distribute at most 510 EVs across all
+ * six stats combined (per-stat still clamps at MAX_EV = 252). This is the
+ * advisory UI budget the editor shows as "Total: X/510" and turns red on; the
+ * service validator remains the final authority on legality (OD-3).
  */
-export const EV_TOTAL_CAP = 252;
+export const EV_TOTAL_CAP = 510;
 
 /**
  * A fresh editor draft for one team slot.

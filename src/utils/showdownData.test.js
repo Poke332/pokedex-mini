@@ -91,9 +91,12 @@ const fixture = () => ({
         // note: charizard-megax deliberately absent → falls back to base
     },
     items: {
-        choicescarf: { name: "Choice Scarf", gen: 4 },
-        lifeorb: { name: "Life Orb", gen: 4 },
-        leftovers: { name: "Leftovers", gen: 2 },
+        choicescarf: { name: "Choice Scarf", gen: 4, shortDesc: "Holder's Speed is 1.5×." },
+        lifeorb: { name: "Life Orb", gen: 4, shortDesc: "Holder's attacks do 1.3× damage; loses 1/10 max HP." },
+        leftovers: { name: "Leftovers", gen: 2, shortDesc: "At end of every turn, holder restores 1/16 of its max HP." },
+        // P2 (fix 1): an item with only `desc` (no shortDesc) — the effect
+        // text must fall back to desc.
+        mysticwater: { name: "Mystic Water", gen: 8, desc: "Mystic Water: weak healing item." },
         // D1 (fix 4): the Charizard-Mega-X gate item. toID("Charizardite X")
         // = "charizarditex" (the live dump's key — spaces stripped), so the
         // formGate carries item id "charizarditex". A dump gap (no matching
@@ -105,6 +108,15 @@ const fixture = () => ({
         capitem: { name: "CAP Item", gen: 9, isNonstandard: "CAP" },
         // an item only available from gen5 — excluded from gen4 pools
         gen5item: { name: "Gen 5 Item", gen: 5 },
+    },
+    // P2 (fix 2): the same-host abilities dump (BattleAbilities shape —
+    // shortDesc/desc per ability). The lane enriches record.abilityDescriptions
+    // from this; unknown abilities degrade to "" (additive).
+    abilities: {
+        blaze: { name: "Blaze", shortDesc: "At 1/3 or less of its max HP, this Pokemon's Fire moves have 1.5× power." },
+        solarpower: { name: "Solar Power", desc: "If Sun is active, this Pokemon's Sp. Atk is 1.5×; loses 1/8 max HP per turn." },
+        static: { name: "Static", shortDesc: "30% chance a Pokemon making contact with this Pokemon will be paralyzed." },
+        lightningrod: { name: "Lightning Rod", desc: "This Pokemon is immune to Electric-type moves and raises Sp. Atk by 1." },
     },
 });
 
@@ -140,7 +152,8 @@ test("buildSpeciesRecord emits the exact C2 §4 shape for a known species", () =
     const rec = buildSpeciesRecord(fixture(), "charizard", gen9);
     // top-level fields, exactly the pinned set
     assert.deepEqual(Object.keys(rec).sort(), [
-        "abilities", "dexNum", "formGate", "gatedForms", "isGmax", "isMega", "items",
+        "abilities", "abilityDescriptions", "dexNum", "formGate", "gatedForms", "isGmax",
+        "isMega", "itemEffects", "itemNames", "items",
         "levelRange", "moves", "natures", "species", "types",
     ]);
     assert.equal(rec.species, "Charizard");
@@ -161,6 +174,64 @@ test("buildSpeciesRecord emits the exact C2 §4 shape for a known species", () =
     assert.equal(mega.item, "charizarditex", "the gate item id (toID of the item name)");
     const gmax = rec.gatedForms.find((f) => f.form === "charizardgmax");
     assert.equal(gmax.item, "", "Gmax has no equippable v1 item (gate item \"\")");
+});
+
+// P2 (fix 1): the record ships itemNames (id -> display) and itemEffects
+// (id -> effect text), keyed by the same item id the wire value uses. The
+// wire item value stays the Showdown id; only display changes.
+test("buildSpeciesRecord ships itemNames + itemEffects keyed by item id", () => {
+    const rec = buildSpeciesRecord(fixture(), "charizard", gen9);
+    // known id maps to its dump name (with spaces)
+    assert.equal(rec.itemNames.lifeorb, "Life Orb");
+    assert.equal(rec.itemNames.leftovers, "Leftovers");
+    assert.equal(rec.itemNames[""], "", "\"\" entry is empty");
+    // effect text prefers shortDesc, falls back to desc, else ""
+    assert.equal(rec.itemEffects.lifeorb, "Holder's attacks do 1.3× damage; loses 1/10 max HP.");
+    assert.equal(
+        rec.itemEffects.mysticwater,
+        "Mystic Water: weak healing item.",
+        "item with only desc uses the desc fallback",
+    );
+    assert.equal(rec.itemEffects.charizarditex, "", "no desc/shortDesc -> \"\"");
+    // every item in the pool has a name entry
+    for (const id of rec.items) {
+        assert.ok(id in rec.itemNames, `itemNames covers pool id "${id}"`);
+        assert.ok(id in rec.itemEffects, `itemEffects covers pool id "${id}"`);
+    }
+});
+
+// P2 (fix 2): the record ships abilityDescriptions keyed by ability id for
+// the species' own ability pool. Unknown/dump-absent abilities map to "".
+test("buildSpeciesRecord ships abilityDescriptions for the ability pool", () => {
+    const rec = buildSpeciesRecord(fixture(), "charizard", gen9);
+    // charizard pool: blaze (default) + solarpower (hidden)
+    assert.ok("blaze" in rec.abilityDescriptions);
+    assert.ok("solarpower" in rec.abilityDescriptions);
+    assert.equal(
+        rec.abilityDescriptions.blaze,
+        "At 1/3 or less of its max HP, this Pokemon's Fire moves have 1.5× power.",
+        "shortDesc wins",
+    );
+    assert.equal(
+        rec.abilityDescriptions.solarpower,
+        "If Sun is active, this Pokemon's Sp. Atk is 1.5×; loses 1/8 max HP per turn.",
+        "desc fallback when no shortDesc",
+    );
+    // every pooled ability id has an entry (even if "")
+    for (const ab of rec.abilities) {
+        assert.ok(ab.id in rec.abilityDescriptions, `abilityDescriptions covers ${ab.id}`);
+    }
+});
+
+// P2 (fix 2, additive): a record built from data WITHOUT an abilities dump
+// still renders — every ability description degrades to "".
+test("buildSpeciesRecord without an abilities dump still renders (additive)", () => {
+    const data = fixture();
+    delete data.abilities; // simulate the abilities.js fetch degrading to {}
+    const rec = buildSpeciesRecord(data, "charizard", gen9);
+    assert.ok(rec, "record still built");
+    assert.ok("blaze" in rec.abilityDescriptions, "ability key still present");
+    assert.equal(rec.abilityDescriptions.blaze, "", "unknown dump -> \"\" (never a wrong desc)");
 });
 
 test("buildSpeciesRecord abilities: default flag + id + order", () => {
@@ -290,7 +361,7 @@ test("loadShowdownIndex caches the fetch (fetchFn called once)", async () => {
     };
     const first = await loadShowdownIndex(fakeFetch);
     const afterFirst = calls;
-    assert.ok(afterFirst >= 4, "first load runs the 4-source fetch batch");
+    assert.ok(afterFirst >= 5, "first load runs the 5-source fetch batch (4 core + abilities)");
     const second = await loadShowdownIndex(fakeFetch);
     assert.equal(calls, afterFirst, "second load does not refetch (cached)");
     assert.equal(first, second, "same cached object returned");

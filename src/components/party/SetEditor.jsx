@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { getSpriteUrl, toProperCase } from "../../utils/api";
 import { TYPE_IDS, MAX_EV, EV_TOTAL_CAP } from "../../utils/pokemonSets";
+import { natureLabel, natureEffectLabel } from "../../utils/natures";
 import TypeBadge from "../TypeBadge";
 
 /**
@@ -129,6 +130,21 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
     ];
     const extraGateItems = gateItems.filter((id) => !items.includes(id));
     const itemOptions = [...items, ...extraGateItems];
+
+    // P2 (fixes 1/2/5): display enrichment for the sim-affecting selects.
+    // itemNames/itemEffects + abilityDescriptions come from the C2 §4 record
+    // (lane-enriched, additive — absent maps degrade to "no hint"). The gate
+    // items appended above may lack pool names/effects, so fall back to a
+    // capitalized id / no effect rather than a blank or wrong string.
+    const itemNames = record?.itemNames || {};
+    const itemEffects = record?.itemEffects || {};
+    const abilityDescriptions = record?.abilityDescriptions || {};
+    const selAbility = set.ability || "";
+    const selAbilityDesc = abilityDescriptions[selAbility] || "";
+    const selItem = set.item || "";
+    const selItemName = selItem ? itemNames[selItem] || toProperCase(selItem) : "";
+    const selItemEffect = selItem ? itemEffects[selItem] || "" : "";
+    const natureEffect = natureEffectLabel(set.nature || "hardy");
     // Which gate item (if any) this set is currently holding?
     const activeGate =
         gatedForms.find((f) => f.item && set.item === f.item) ||
@@ -232,6 +248,17 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                     </option>
                                 ))}
                             </select>
+                            {/* P2 (fix 2/5): the selected ability's one-line effect.
+                                Additive — an unknown/dump-absent ability has no
+                                desc, so the line is simply absent (never wrong). */}
+                            {selAbilityDesc && (
+                                <p
+                                    title={selAbilityDesc}
+                                    className="mt-1 truncate text-[10px] font-normal normal-case text-neutral-400"
+                                >
+                                    {selAbilityDesc}
+                                </p>
+                            )}
                         </label>
 
                         <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
@@ -244,13 +271,27 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                             >
                                 {itemOptions.map((id, i) => {
                                     const isGate = extraGateItems.includes(id);
+                                    const label = id
+                                        ? itemNames[id] || toProperCase(id)
+                                        : "No item";
                                     return (
                                         <option key={id || `none-${i}`} value={id}>
-                                            {isGate ? `★ ${id} (form item)` : id || "No item"}
+                                            {isGate ? `★ ${label} (form item)` : label}
                                         </option>
                                     );
                                 })}
                             </select>
+                            {/* P2 (fix 1/5): the selected item's effect. Full text
+                                lives in the native `title` tooltip; the visible
+                                line is a one-line truncation. */}
+                            {selItemEffect && (
+                                <p
+                                    title={selItemEffect}
+                                    className="mt-1 truncate text-[10px] font-normal normal-case text-neutral-400"
+                                >
+                                    {selItemName} — {selItemEffect}
+                                </p>
+                            )}
                         </label>
 
                         <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
@@ -277,10 +318,18 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                             >
                                 {(natures.length ? natures : ["hardy"]).map((n) => (
                                     <option key={n} value={n}>
-                                        {toProperCase(n)}
+                                        {natureLabel(n)}
                                     </option>
                                 ))}
                             </select>
+                            {/* P2 (fix 3/5): what the selected nature changes.
+                                The 25 canonical natures all map in NATURES; an
+                                out-of-table id yields "" and the line is hidden. */}
+                            {natureEffect && (
+                                <p className="mt-1 text-[10px] font-normal normal-case text-neutral-400">
+                                    {natureEffect}
+                                </p>
+                            )}
                         </label>
 
                         <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
@@ -296,6 +345,11 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                     <option key={t} value={t}>{toProperCase(t)}</option>
                                 ))}
                             </select>
+                            {/* P2 (fix 5): C2 §1 optional type metadata — the
+                                Hidden Power move's type, determined by IVs. */}
+                            <p className="mt-1 text-[10px] font-normal normal-case text-neutral-400">
+                                Optional metadata — sets the Hidden Power move's type (from IVs); omitted when the sim defaults it.
+                            </p>
                         </label>
 
                         <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
@@ -311,6 +365,11 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                     <option key={t} value={t}>{toProperCase(t)}</option>
                                 ))}
                             </select>
+                            {/* P2 (fix 5): C2 §1 optional type metadata — the
+                                Gen-9 Tera form type override. */}
+                            <p className="mt-1 text-[10px] font-normal normal-case text-neutral-400">
+                                Tera form type override for gen9 formats; ignored by the sim in non-Tera formats.
+                            </p>
                         </label>
                     </div>
 
@@ -458,6 +517,14 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                 Total: {evTotal}/{EV_TOTAL_CAP}
                             </p>
                         </div>
+                        {/* P2 (fix 4): the in-game total cap is 510, not 252.
+                            253–510 is legal (no red); only >510 flags the
+                            advisory hint. Per-stat clamps remain 0–252. */}
+                        {evTotal > EV_TOTAL_CAP && (
+                            <p className="mb-2 text-[10px] font-normal text-red-600">
+                                Over the {EV_TOTAL_CAP} in-game EV cap — trim {evTotal - EV_TOTAL_CAP} EV to reach it.
+                            </p>
+                        )}
                         <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
                             {statKeys.map((k) => (
                                 <label key={k} className="block text-[10px] font-semibold uppercase text-neutral-400">
