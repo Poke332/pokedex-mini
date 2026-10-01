@@ -177,7 +177,9 @@ export default function PartyPage() {
         setValidating(true);
         setProblems([]);
         try {
-            const result = await validateTeam(buildTeam(team), format);
+            // D1 (fix 4): resolve form-gated species against the current-format
+            // records (base form + equipped gate item → the transformed form).
+            const result = await validateTeam(buildTeam(team, records), format);
             if (!result.reachable) {
                 setProblems(["Battle service unreachable — start the sim service and retry."]);
                 return;

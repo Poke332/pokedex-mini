@@ -18,6 +18,8 @@ import {
     switchDisabledReason,
     parseLogLine,
     isDisplayLogLine,
+    reconcileLog,
+    dedupeConsecutiveRows,
 } from "./battleLog.js";
 import { spriteUrlFor } from "./battleSprites.js";
 
@@ -97,6 +99,134 @@ test("isDisplayLogLine drops protocol-internal lines", () => {
     assert.equal(isDisplayLogLine("|win|P1"), false);
     assert.equal(isDisplayLogLine("|"), false);
     assert.equal(isDisplayLogLine(""), false);
+});
+
+// D1 (fix 2): the display gate is the C1 §3.2 HUMAN event set, and only it.
+// Anything parseLogLine's switch does not recognize is hidden — never an
+// "info" line. Protocol noise and unlisted events drop; every recognized
+// human event keeps.
+test("isDisplayLogLine: only the C1 §3.2 human events render", () => {
+    // the full human set (positive)
+    for (const line of [
+        "|turn|1",
+        "|move|p1a: Garchomp|Earthquake|p2a: Corviknight",
+        "|switch|p1a: Charizard|Charizard",
+        "|-switch|p2a: Garchomp|",
+        "|status|p2a: Corviknight|par",
+        "|-status|p1a: Garchomp|psn",
+        "|clearstatus|p1a: Garchomp|psn",
+        "|-clearstatus|p2a: Corviknight|psn",
+        "|-damage|p1a: Garchomp|62/100",
+        "|-heal|p2a: Corviknight|329/400",
+        "|immune|p2a: Garchomp|Earthquake|",
+        "|-immune|p1a: Corviknight|Flamethrower",
+        "|-boost|p1a: Garchomp|atk",
+        "|-unboost|p2a: Corviknight|def",
+        "|-ability|p1a: Garchomp|Sand Veil",
+        "|weather|Rain Dance",
+        "|-weather|Rain Dance",
+        "|faint|p1a: Garchomp|42/357",
+    ]) assert.equal(isDisplayLogLine(line), true, `should show: ${line}`);
+
+    // request lines + timestamps + stat-block chunks + unlisted events
+    // (hidden — the "console-only" lines that used to leak as info).
+    for (const line of [
+        '|request|{"rqid":"1","active":[{"moves":[]}]}',
+        "|t:|1790857715000",
+        "|upkeep|p1a: Garchomp|",
+        "|split|p1",
+        "|start|gen9ou",
+        "|res|329/400",
+        "|name|P1",
+        "|side|p1",
+        "|msg|hello",
+    ]) assert.equal(isDisplayLogLine(line), false, `should hide: ${line}`);
+});
+
+// ------------------------------------------------------------- D1 (fix 1)
+// reconcileLog — idempotent log accumulation. The notYourTurn resync path
+// re-ships the room's LAST slice, which overlaps the already-accumulated
+// tail; appending blindly would double the display rows.
+test("reconcileLog: disjoint slice appends cleanly", () => {
+    const prev = ["|turn|1", "|move|p1a: Garchomp|Earthquake|p2a: Corviknight"];
+    const slice = ["|turn|2", "|move|p2a: Corviknight|Peck|p1a: Garchomp"];
+    assert.deepEqual(reconcileLog(prev, slice), [
+        "|turn|1", "|move|p1a: Garchomp|Earthquake|p2a: Corviknight",
+        "|turn|2", "|move|p2a: Corviknight|Peck|p1a: Garchomp",
+    ]);
+});
+
+test("reconcileLog: fully-overlapping resync slice is a no-op", () => {
+    const prev = ["|turn|1", "|move|p1a: Garchomp|Earthquake|p2a: Corviknight", "|turn|2"];
+    // the room's lastEnvelope re-ships its own slice — every line already
+    // accumulated. Nothing new, no duplicates.
+    assert.deepEqual(reconcileLog(prev, ["|move|p1a: Garchomp|Earthquake|p2a: Corviknight", "|turn|2"]), prev);
+    // and the whole-slice overlap (exact same array) collapses to identity.
+    assert.deepEqual(reconcileLog(prev, prev), prev);
+});
+
+test("reconcileLog: partial overlap (move -> notYourTurn resync) dedupes the tail", () => {
+    // Normal advance shipped [move, -damage]. Then a race: the notYourTurn
+    // resync returns the room's LAST slice, which started at the -damage
+    // line (overlapping the tail) plus the two genuinely-new lines.
+    const prev = ["|turn|1", "|move|p1a: Garchomp|Earthquake|p2a: Corviknight", "|-damage|p2a: Corviknight|8/340"];
+    const resync = ["|-damage|p2a: Corviknight|8/340", "|turn|2", "|move|p2a: Corviknight|Peck|p1a: Garchomp"];
+    const out = reconcileLog(prev, resync);
+    assert.deepEqual(out, [
+        "|turn|1",
+        "|move|p1a: Garchomp|Earthquake|p2a: Corviknight",
+        "|-damage|p2a: Corviknight|8/340",
+        "|turn|2",
+        "|move|p2a: Corviknight|Peck|p1a: Garchomp",
+    ]);
+    // no duplicate display rows: every displayable line appears exactly once
+    const display = out.filter(isDisplayLogLine);
+    const rendered = display.map(parseLogLine).map((r) => r.kind + ":" + r.text);
+    assert.equal(new Set(rendered).size, rendered.length, "no duplicate display rows");
+});
+
+test("reconcileLog: collapses exact consecutive duplicates (resync safety net)", () => {
+    const prev = ["|turn|1", "|move|p1a: Garchomp|Earthquake|p2a: Corviknight"];
+    // same line shipped twice in a row (pathological resync): one row, not two.
+    const out = reconcileLog(prev, ["|move|p1a: Garchomp|Earthquake|p2a: Corviknight", "|turn|2"]);
+    assert.deepEqual(out, ["|turn|1", "|move|p1a: Garchomp|Earthquake|p2a: Corviknight", "|turn|2"]);
+});
+
+test("reconcileLog: empty/null slices are no-ops", () => {
+    const prev = ["|turn|1"];
+    assert.deepEqual(reconcileLog(prev, []), prev);
+    assert.deepEqual(reconcileLog(prev, null), prev);
+    assert.deepEqual(reconcileLog(null, ["|turn|1"]), ["|turn|1"]);
+});
+
+// D1 (fix 1, display level): dedupeConsecutiveRows collapses two DIFFERENT
+// raw events that render the identical display row back-to-back — the classic
+// |switch| + |-switch| pair ("X went on the field!") or |weather| +
+// |-weather| ("The weather became X").
+test("dedupeConsecutiveRows: collapses the |switch| + |-switch| duplicate pair", () => {
+    const rows = [
+        "|switch|p1a: Charizard|Charizard",
+        "|-switch|p1a: Charizard|Charizard|Lv. 100",
+    ].filter(isDisplayLogLine).map(parseLogLine);
+    assert.deepEqual(
+        dedupeConsecutiveRows(rows),
+        [{ kind: "info", text: "Charizard went on the field!" }],
+    );
+});
+
+test("dedupeConsecutiveRows: non-consecutive repeats are kept", () => {
+    const rows = [
+        "|turn|1",
+        "|move|p1a: Garchomp|Earthquake|p2a: Corviknight",
+        "|turn|2",
+        "|move|p1a: Garchomp|Earthquake|p2a: Corviknight",
+    ].map(parseLogLine);
+    assert.equal(dedupeConsecutiveRows(rows).length, 4, "same move on two turns is not a duplicate");
+});
+
+test("dedupeConsecutiveRows: empty input", () => {
+    assert.deepEqual(dedupeConsecutiveRows([]), []);
+    assert.deepEqual(dedupeConsecutiveRows(null), []);
 });
 
 test("isDisplayLogLine keeps human lines + turn dividers", () => {

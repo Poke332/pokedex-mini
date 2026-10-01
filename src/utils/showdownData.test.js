@@ -28,12 +28,34 @@ const fixture = () => ({
         },
         // forme (mega) — not in learnsets, must fall back to base species.
         // pokedex keys are toID-normalized (no dashes), matching the real dump.
+        // `requiredItem` is the D1 (fix 4) form-gate flag: this forme only
+        // battles while the Mega Stone is held.
         charizardmegax: {
             num: 6,
             name: "Charizard-Mega-X",
+            baseSpecies: "Charizard",
+            forme: "Mega-X",
+            requiredItem: "Charizardite X",
             types: ["Fire", "Dragon"],
             abilities: { "0": "Tough Claws" },
+        },
+        // Gmax forme (D1 fix 4): forme "Gmax" — runs its base form in v1
+        // (the dump carries no equippable Gmax item, so the gate item is "").
+        charizardgmax: {
+            num: 6,
+            name: "Charizard-Gmax",
             baseSpecies: "Charizard",
+            forme: "Gmax",
+            types: ["Fire", "Flying"],
+            abilities: { "0": "Solar Power" },
+        },
+        pikachugmax: {
+            num: 25,
+            name: "Pikachu-Gmax",
+            baseSpecies: "Pikachu",
+            forme: "Gmax",
+            types: ["Electric"],
+            abilities: { "0": "Static" },
         },
         // base species with a third (slot "1") ability
         pikachu: {
@@ -72,6 +94,11 @@ const fixture = () => ({
         choicescarf: { name: "Choice Scarf", gen: 4 },
         lifeorb: { name: "Life Orb", gen: 4 },
         leftovers: { name: "Leftovers", gen: 2 },
+        // D1 (fix 4): the Charizard-Mega-X gate item. toID("Charizardite X")
+        // = "charizarditex" (the live dump's key — spaces stripped), so the
+        // formGate carries item id "charizarditex". A dump gap (no matching
+        // key) degrades the gate item to "" (no equippable gate).
+        charizarditex: { name: "Charizardite X", gen: 6 },
         // Past/Future/CAP must be excluded from the standard pool
         ancientbell: { name: "Ancient Bell", gen: 8, isNonstandard: "Past" },
         futureitem: { name: "Future Item", gen: 9, isNonstandard: "Future" },
@@ -113,7 +140,8 @@ test("buildSpeciesRecord emits the exact C2 §4 shape for a known species", () =
     const rec = buildSpeciesRecord(fixture(), "charizard", gen9);
     // top-level fields, exactly the pinned set
     assert.deepEqual(Object.keys(rec).sort(), [
-        "abilities", "dexNum", "items", "levelRange", "moves", "natures", "species", "types",
+        "abilities", "dexNum", "formGate", "gatedForms", "isGmax", "isMega", "items",
+        "levelRange", "moves", "natures", "species", "types",
     ]);
     assert.equal(rec.species, "Charizard");
     assert.equal(rec.dexNum, 6);
@@ -122,6 +150,17 @@ test("buildSpeciesRecord emits the exact C2 §4 shape for a known species", () =
     assert.equal(rec.natures.length, 25);
     assert.ok(rec.natures.includes("hardy"));
     assert.ok(rec.natures.includes("jolly"));
+    // D1 (fix 4) gate fields on a base species: flags default false, and the
+    // base record lists the gated sibling formes (gatedForms).
+    assert.equal(rec.isMega, false);
+    assert.equal(rec.isGmax, false);
+    assert.equal(rec.formGate, null, "no formGate on a base record");
+    assert.ok(Array.isArray(rec.gatedForms), "base record exposes its gated formes");
+    const mega = rec.gatedForms.find((f) => f.form === "charizardmegax");
+    assert.equal(mega.itemName, "Charizardite X");
+    assert.equal(mega.item, "charizarditex", "the gate item id (toID of the item name)");
+    const gmax = rec.gatedForms.find((f) => f.form === "charizardgmax");
+    assert.equal(gmax.item, "", "Gmax has no equippable v1 item (gate item \"\")");
 });
 
 test("buildSpeciesRecord abilities: default flag + id + order", () => {
@@ -208,7 +247,30 @@ test("buildRecordsForSpecies returns the pinned two-level shape", () => {
 
 test("buildSpeciesList returns sorted pokedex species ids", () => {
     const list = buildSpeciesList(fixture());
-    assert.deepEqual(list, ["charizard", "charizardmegax", "pikachu"]);
+    assert.deepEqual(list, [
+        "charizard", "charizardgmax", "charizardmegax", "pikachu", "pikachugmax",
+    ]);
+});
+
+// D1 (fix 4): a FORM record carries its formGate (the required item + the
+// base it resolves to); the base record's gatedForms are covered above.
+test("buildSpeciesRecord on a gated FORM carries its formGate", () => {
+    const mega = buildSpeciesRecord(fixture(), "charizardmegax", gen9);
+    assert.equal(mega.isMega, true);
+    assert.equal(mega.isGmax, false);
+    assert.deepEqual(mega.formGate, {
+        form: "charizardmegax",
+        base: "charizard",
+        item: "charizarditex",
+        itemName: "Charizardite X",
+        formName: "Charizard-Mega-X",
+        baseName: "Charizard",
+    });
+
+    const gmax = buildSpeciesRecord(fixture(), "charizardgmax", gen9);
+    assert.equal(gmax.isMega, false);
+    assert.equal(gmax.isGmax, true);
+    assert.equal(gmax.formGate.item, "", "Gmax gate has no equippable v1 item");
 });
 
 // --- module-wide fetch cache (injectable fetchFn; no network in the test) ---

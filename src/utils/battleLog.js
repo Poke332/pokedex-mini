@@ -105,10 +105,18 @@ const RE_FAINT = /^\|faint\|/;
 const RE_TURN = /^\|turn\|(\d+)$/;
 const RE_EMPTY = /^\|\s*$/;
 
-// Protocol-internal lines: dropped from the display log entirely.
-const HIDDEN_EVENTS = new Set([
-    "split", "upkeep", "gametype", "player", "teamsize", "side", "name",
-    "win", "start", "res", "notime",
+// The C1 §3.2 human events, and only those. Anything parseLogLine's switch
+// does NOT recognize (|request|{...}, |t:| timestamps, stat-block chunks,
+// |upkeep|, |gametype| variants, …) is protocol noise: it is hidden from the
+// log, never rendered as an "info" line.
+const DISPLAY_EVENTS = new Set([
+    "turn", "faint",
+    "move", "switch", "-switch",
+    "status", "-status", "clearstatus", "-clearstatus",
+    "-damage", "-heal",
+    "immune", "-immune",
+    "-boost", "-unboost", "-ability",
+    "weather", "-weather",
 ]);
 
 // Status ids -> the word Showdown's display code uses for the condition.
@@ -183,16 +191,18 @@ export function parseLogLine(raw) {
         case "weather":
             return { kind: "info", text: `The weather became ${parts[0]}` };
         default:
-            // Anything rare (items, sidestart, …): a readable fallback.
+            // Unrecognized token: the display gate (isDisplayLogLine) hides it,
+            // so this fallback is unreachable from the log UI — kept readable
+            // for direct parseLogLine callers.
             return { kind: "info", text: [who, ev.startsWith("-") ? ev.slice(1) : ev, parts.slice(1).join(" ")].filter(Boolean).join(" ") };
     }
 }
 
 /**
- * Whether a raw log line should be shown at all. Protocol-internal lines
- * (|split, |t:, |upkeep, |gametype, |player, |teamsize, |win, empty …)
- * are dropped — the win banner (§3.2 end state) is the result's display
- * surface, not the log.
+ * Whether a raw log line should be shown at all: only the C1 §3.2 human
+ * events (DISPLAY_EVENTS) render. Every other protocol line (|request|,
+ * |t:, |upkeep|, |gametype|, stat blocks, …) is dropped — the win banner
+ * (§3.2 end state) is the result's display surface, not the log.
  * @param {string} raw
  * @returns {boolean}
  */
@@ -200,7 +210,66 @@ export function isDisplayLogLine(raw) {
     const line = String(raw || "");
     if (!line || RE_EMPTY.test(line)) return false;
     const m = line.match(/^\|([a-z-]+)\|/);
-    if (m && HIDDEN_EVENTS.has(m[1])) return false;
-    if (/^\|t:\|/.test(line)) return false;
-    return RE_TURN.test(line) || /^\|[a-z-]+\|/.test(line);
+    if (!m) return false; // non-protocol line (or |t: timestamp): hidden
+    return DISPLAY_EVENTS.has(m[1]);
+}
+
+/**
+ * D1 (fix 1): collapse consecutive identical DISPLAY rows. Two different
+ * raw events can render the same sentence back-to-back — the classic case
+ * is a `|switch|` announcement immediately followed by its `|-switch|`
+ * stat-block twin (both read "X went on the field!"), or `|weather|` +
+ * `|-weather|` ("The weather became X"). A reader scanning the log reads
+ * that as a duplicate row. Repeats that are NOT consecutive are kept.
+ *
+ * @param {{kind:string, text:string}[]} rows parsed display rows.
+ * @returns {Array<{kind:string, text:string}>} the rows with consecutive
+ *   identical (kind + text) repeats collapsed to one.
+ */
+export function dedupeConsecutiveRows(rows) {
+    const out = [];
+    for (const row of rows || []) {
+        const prev = out[out.length - 1];
+        if (prev && prev.kind === row.kind && prev.text === row.text) continue;
+        out.push(row);
+    }
+    return out;
+}
+
+/**
+ * Idempotent log accumulation for the /battle page (D1 fix 1).
+ *
+ * The service ships only NEW lines per envelope (room.js slices at
+ * lastEnvLogLen), so a normal advance never overlaps. The resync path
+ * (notYourTurn -> GET /battle/:id, whose state() is the room's lastEnvelope)
+ * re-ships the LAST slice, which can already be in the accumulated log —
+ * blindly appending would double the rows. reconcileLog finds the longest
+ * suffix of `prev` that matches the head of `slice` and appends only the
+ * new tail, then collapses exact consecutive duplicates as a resync safety
+ * net. startNewBattle's setLog(res.envelope.log) stays the only reset.
+ *
+ * @param {string[]} prev the accumulated raw log lines.
+ * @param {string[]} slice the envelope's log slice (may overlap the tail).
+ * @returns {string[]} the reconciled accumulated log.
+ */
+export function reconcileLog(prev, slice) {
+    const p = Array.isArray(prev) ? prev : [];
+    const s = Array.isArray(slice) ? slice : [];
+    if (!s.length) return p;
+    let overlap = 0;
+    const cap = Math.min(p.length, s.length);
+    for (let n = cap; n >= 1; n -= 1) {
+        let matches = true;
+        for (let i = 0; i < n; i += 1) {
+            if (p[p.length - n + i] !== s[i]) { matches = false; break; }
+        }
+        if (matches) { overlap = n; break; }
+    }
+    const merged = [...p, ...s.slice(overlap)];
+    const out = [];
+    for (const line of merged) {
+        if (out.length && out[out.length - 1] === line) continue;
+        out.push(line);
+    }
+    return out;
 }

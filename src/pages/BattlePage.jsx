@@ -5,7 +5,8 @@ import { buildTeam } from "../utils/pokemonSets";
 import { startBattle, sendChoice, getBattleState } from "../utils/simService";
 import { getRecordsForSpecies } from "../utils/showdownData";
 import { loadDexMap } from "../utils/battleSprites";
-import { isDisplayLogLine, parseLogLine } from "../utils/battleLog";
+import { isDisplayLogLine, parseLogLine, reconcileLog } from "../utils/battleLog";
+import { getTypeDamageRelations } from "../utils/api";
 import TeamPreviewGrid from "../components/battle/TeamPreviewGrid";
 import PokemonPlate from "../components/battle/PokemonPlate";
 import MoveButton from "../components/battle/MoveButton";
@@ -65,6 +66,19 @@ export default function BattlePage() {
     const [records, setRecords] = useState({});
     const [dexMap, setDexMap] = useState({});
     const [laneRetry, setLaneRetry] = useState(0);
+    // D1 (fix 3): the move tooltips' type-effectiveness table. Loaded once
+    // module-wide (api.js caches the promise); null while pending → the
+    // panels read "—" rather than guess.
+    const [typeRelations, setTypeRelations] = useState(null);
+    useEffect(() => {
+        let cancelled = false;
+        getTypeDamageRelations()
+            .then((rel) => {
+                if (!cancelled) setTypeRelations(rel.relations);
+            })
+            .catch(() => { /* the panels stay "—"; the rest of the page is unaffected */ });
+        return () => { cancelled = true; };
+    }, []);
 
     // The lane returns the nested C2 §4 shape { speciesId: { formatId: record } }
     // (the getRecordsForSpecies output); the components consume a flat
@@ -82,6 +96,15 @@ export default function BattlePage() {
     const toastTimer = useRef(null);
     const startTimer = useRef(null);
     const laneKey = speciesIds.join(",");
+    // D1 (fix 4): the mount-time create call runs before the data lane lands,
+    // but the retry path (and every later create) must resolve form-gated
+    // species with the CURRENT records. A ref synced in an effect reads the
+    // latest value without adding the derived object to startNewBattle's
+    // deps (no ref writes during render).
+    const recordsForFormatRef = useRef({});
+    useEffect(() => {
+        recordsForFormatRef.current = recordsForFormat;
+    }, [recordsForFormat]);
 
     const showToast = useCallback((msg) => {
         setToast(msg);
@@ -128,7 +151,12 @@ export default function BattlePage() {
         setBenchOpen(false);
         setErrorInfo(null);
         try {
-            const res = await startBattle({ format, p1Team: buildTeam(team) });
+            // D1 (fix 4): pass the current-format records so buildTeam can
+            // resolve form-gated sets (base form + gate item → the transformed
+            // form; forme without the item → base) before shipping to the sim.
+            // The ref carries the latest records (the mount-time create runs
+            // before the lane lands; retries read the loaded map).
+            const res = await startBattle({ format, p1Team: buildTeam(team, recordsForFormatRef.current) });
             if (!res.ok) {
                 setErrorInfo(res);
                 setPhase("error");
@@ -160,7 +188,13 @@ export default function BattlePage() {
     // ------------------------------------------------------------------ turn
     const applyEnvelope = useCallback((env) => {
         setEnvelope(env);
-        if (env.log?.length) setLog((prev) => [...prev, ...env.log]);
+        // Idempotent accumulation (D1 fix 1): a normal advance ships only new
+        // lines, but the notYourTurn resync path re-ships the room's LAST
+        // slice, which can already be in the log. reconcileLog overlaps the
+        // matching tail and drops exact consecutive duplicates, so re-apply
+        // can never double the display rows. startNewBattle above is the
+        // only reset point.
+        if (env.log?.length) setLog((prev) => reconcileLog(prev, env.log));
         const cr = env.choiceRequest || {};
         // A new foe can appear (switch on the opposing side) — widen the lane.
         if (env.foe?.species) {
@@ -289,15 +323,29 @@ export default function BattlePage() {
         <div className="w-full rounded-lg border border-neutral-200 bg-white p-4">
             {/* Moves: 2×2 grid (C1 §3.2) */}
             <div className="grid grid-cols-2 gap-2">
-                {(cr?.legalMoves || []).map((move) => (
-                    <MoveButton
-                        key={move.id}
-                        move={move}
-                        busy={busy}
-                        disabledByState={movesDisabledByState}
-                        onMove={commitMove}
-                    />
-                ))}
+                {(cr?.legalMoves || []).map((move) => {
+                    // D1 (fix 3): enrich the C2 §2.2 MoveEntry with the
+                    // data-lane record for this move (adds `accuracy` so the
+                    // tooltip can show the full detail row); the active
+                    // foe's types come from withMeta so the effectiveness
+                    // line recomputes when the opponent's active changes.
+                    const moveMeta =
+                        activeMon && recordsForFormat[activeMon.species]
+                            ? (recordsForFormat[activeMon.species].moves || []).find((m) => m.id === move.id)
+                            : null;
+                    return (
+                        <MoveButton
+                            key={move.id}
+                            move={move}
+                            moveMeta={moveMeta}
+                            busy={busy}
+                            disabledByState={movesDisabledByState}
+                            onMove={commitMove}
+                            foe={withMeta(foeMon)}
+                            relations={typeRelations}
+                        />
+                    );
+                })}
                 {(cr?.legalMoves || []).length === 0 && !busy && (
                     <p className="col-span-2 text-sm text-neutral-500">No moves available</p>
                 )}

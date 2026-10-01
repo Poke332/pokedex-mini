@@ -16,6 +16,7 @@ import {
     MAX_EV,
     EV_TOTAL_CAP,
     TYPE_IDS,
+    resolveSpeciesForFormGate,
 } from "./pokemonSets.js";
 import { loadParty, saveParty, resetParty, PARTY_STORAGE_KEY } from "./partyStore.js";
 import { unresolvedMoves, PARTY_FORMATS } from "./party.js";
@@ -110,6 +111,116 @@ test("invariants: EV caps and the 18-type metadata list", () => {
     assert.equal(TYPE_IDS.length, 18);
     assert.ok(TYPE_IDS.includes("fairy"));
     assert.ok(!TYPE_IDS.includes("steelx"));
+});
+
+// --- D1 (fix 4): form-gated transforms ------------------------------------
+// A FORM that requires a held item (Mega stone / Z-Crystal / Primal orb / …)
+// must NOT auto-expand: the builder defaults to the BASE form and only
+// resolves to the transformed form while the gate item is held. The
+// PokemonSet wire shape is unchanged (species is still a single string).
+const megaxRecord = {
+    species: "Charizard-Mega-X",
+    formGate: {
+        form: "charizardmegax",
+        base: "charizard",
+        item: "charizarditex",
+        itemName: "Charizardite X",
+        formName: "Charizard-Mega-X",
+        baseName: "Charizard",
+    },
+    abilities: [{ id: "toughclaws", name: "Tough Claws", default: true }],
+};
+const baseRecord = {
+    species: "Charizard",
+    gatedForms: [
+        { form: "charizardmegax", item: "charizarditex", itemName: "Charizardite X", formName: "Charizard-Mega-X" },
+        { form: "charizardgmax", item: "", itemName: "", formName: "Charizard-Gmax" },
+    ],
+    abilities: [{ id: "blaze", name: "Blaze", default: true }],
+};
+
+test("blankSet: a FORM-gated species defaults to its BASE form", () => {
+    // Adding Charizard-Mega-X to the party starts on Charizard (base) with
+    // item "" — the SetEditor surfaces the Charizardite X gate; the set only
+    // becomes the Mega form when the user equips the item.
+    const s = blankSet("charizardmegax", megaxRecord);
+    assert.equal(s.species, "charizard", "builder default = base form");
+    assert.equal(s.item, "");
+});
+
+test("blankSet: a Gmax gate (no v1 item) also defaults to the base form", () => {
+    // Gmax formes carry formGate.item === "" (no equippable v1 item); the
+    // builder still holds the requirement — no silent auto-transform.
+    const gmaxRecord = {
+        species: "Charizard-Gmax",
+        formGate: {
+            form: "charizardgmax",
+            base: "charizard",
+            item: "",
+            itemName: "",
+            formName: "Charizard-Gmax",
+            baseName: "Charizard",
+        },
+    };
+    const s = blankSet("charizardgmax", gmaxRecord);
+    assert.equal(s.species, "charizard", "Gmax default = base form (no item to hold)");
+});
+
+test("blankSet: a form WITHOUT an item requirement keeps its own species", () => {
+    // e.g. Charizard-Alola has no requiredItem — it is its own legal species.
+    const s = blankSet("charizardalola", { species: "Charizard-Alola" });
+    assert.equal(s.species, "charizardalola");
+});
+
+test("resolveSpeciesForFormGate: stored form + gate item = the form; without it = the base", () => {
+    // A set stored as the form only exists while its item is held.
+    assert.equal(resolveSpeciesForFormGate("charizardmegax", megaxRecord, "charizarditex"), "charizardmegax");
+    assert.equal(resolveSpeciesForFormGate("charizardmegax", megaxRecord, ""), "charizard", "item-less form -> base");
+    assert.equal(resolveSpeciesForFormGate("charizardmegax", megaxRecord, "choicescarf"), "charizard", "wrong item -> base");
+});
+
+test("resolveSpeciesForFormGate: base + gate item = the transformed form (gated transform on equip)", () => {
+    assert.equal(resolveSpeciesForFormGate("charizard", baseRecord, "charizarditex"), "charizardmegax");
+    assert.equal(resolveSpeciesForFormGate("charizard", baseRecord, ""), "charizard", "no item: base form default");
+    assert.equal(resolveSpeciesForFormGate("charizard", baseRecord, "choicescarf"), "charizard", "non-gate item: base");
+    // Gmax gate (item "") can never match — the base stays the base.
+    assert.equal(resolveSpeciesForFormGate("charizard", baseRecord, "dynamaxband"), "charizard");
+});
+
+test("normalizeSet: form-gated species resolves with the record (wire shape unchanged)", () => {
+    // Stored form, gate item held -> normalized set ships the form id.
+    const withItem = normalizeSet(
+        { species: "charizardmegax", item: "charizarditex" },
+        megaxRecord,
+    );
+    assert.equal(withItem.species, "charizardmegax");
+    assert.equal(withItem.item, "charizarditex");
+
+    // Stored form WITHOUT the gate item -> the base form, item kept as-is.
+    const noItem = normalizeSet({ species: "charizardmegax", item: "" }, megaxRecord);
+    assert.equal(noItem.species, "charizard", "item-less forme reverts to base");
+
+    // No record (lane not loaded): the stored species passes through —
+    // the service validator remains the final authority.
+    assert.equal(normalizeSet({ species: "charizardmegax", item: "" }).species, "charizardmegax");
+});
+
+test("buildTeam: per-species record map resolves gated forms at team build", () => {
+    const team = buildTeam(
+        [
+            { species: "charizard", item: "charizarditex" },
+            { species: "charizard" },
+        ],
+        { charizard: baseRecord },
+    );
+    assert.equal(team.length, 2);
+    assert.equal(team[0].species, "charizardmegax", "gate item held -> transformed form");
+    assert.equal(team[1].species, "charizard", "no item -> base form default");
+    // wire shape is still the plain C2 §1 PokemonSet — no extra fields leak.
+    assert.deepEqual(
+        Object.keys(team[0]).filter((k) => !["evs", "ivs"].includes(k)).sort(),
+        ["ability", "item", "level", "moves", "nature", "species"],
+    );
 });
 
 // --- partyStore ---------------------------------------------------------------

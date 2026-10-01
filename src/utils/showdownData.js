@@ -142,6 +142,9 @@ export const buildSpeciesRecord = (data, speciesId, formatId) => {
                 // report 0 in the dump — normalize to null so a "—" badge reads
                 // as "no power", not "0".
                 power: mv.category === "Status" ? null : mv.basePower ?? null,
+                // accuracy: numeric (Flamethrower 100), true (Swords Dance
+                // always hits), or null when the dump omits it.
+                accuracy: mv.accuracy ?? null,
             });
         }
         movesList.sort((a, b) => a.name.localeCompare(b.name));
@@ -157,6 +160,53 @@ export const buildSpeciesRecord = (data, speciesId, formatId) => {
         .sort((a, b) => (items[a].name || a).localeCompare(items[b].name || b));
     const itemPool = ["", ...itemIds];
 
+    // D1 (fix 4): form-gating fields. A pokedex `forme` that REQUIRES a held
+    // item (Mega stone, Z-Crystal, Primal orb, drive, memory, mask …) only
+    // exists in battle while that item is held — the party builder stores such
+    // a species as its BASE form and gates the transform on the item. Gmax
+    // formes (Gigantamax) also run their base form in v1: the dump carries no
+    // equippable Gmax item, so the gate has item "" (unreachable, not offered).
+    // All 126 `requiredItem` names in the live dump resolve to an item id via
+    // toID(name); this is re-checked per record so a dump gap degrades to
+    // "no gate" (validator stays the authority) instead of a broken option.
+    const isMega = /mega/i.test(String(species.forme || ""));
+    const isGmax = species.forme === "Gmax";
+    const gateItemName = species.requiredItem || null;
+    const gateItemId = gateItemName
+        ? (items[toID(gateItemName)] ? toID(gateItemName) : "")
+        : (isGmax ? "" : null);
+    const formGate = species.baseSpecies && (gateItemName || isGmax)
+        ? {
+            form: spKey,
+            base: baseKey,
+            item: gateItemId, // "" = no equippable item (Gmax in v1)
+            itemName: gateItemName || "",
+            formName: species.name,
+            baseName: species.baseSpecies,
+          }
+        : null;
+
+    // The BASE record's inverse of formGate: every gated sibling forme of
+    // this species (Mega/Z-Crystal/Primal … — any forme carrying a
+    // `requiredItem`, plus Gmax which is gated with item "" in v1). The
+    // party builder + SetEditor use this to surface the item GATE on a
+    // base-form set.
+    let gatedForms = null;
+    if (!species.forme) {
+        const found = [];
+        for (const sp of Object.values(pokedex)) {
+            if (sp.forme === "Gmax") {
+                if (toID(String(sp.name || "").split("-")[0]) === spKey) {
+                    found.push({ form: toID(sp.name), item: "", itemName: "", formName: sp.name });
+                }
+            } else if (sp.requiredItem && toID(sp.name.split("-")[0]) === spKey) {
+                const itemId = items[toID(sp.requiredItem)] ? toID(sp.requiredItem) : "";
+                found.push({ form: toID(sp.name), item: itemId, itemName: sp.requiredItem, formName: sp.name });
+            }
+        }
+        gatedForms = found.length ? found : null;
+    }
+
     return {
         species: species.name,
         dexNum: species.num ?? null,
@@ -166,6 +216,10 @@ export const buildSpeciesRecord = (data, speciesId, formatId) => {
         items: itemPool,
         levelRange: LEVEL_RANGE,
         natures: ALL_NATURES.slice(),
+        isMega,
+        isGmax,
+        formGate,
+        gatedForms,
     };
 };
 
