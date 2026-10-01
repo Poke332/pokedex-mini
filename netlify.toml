@@ -1,0 +1,13 @@
+# pokedex-mini
+# Netlify build config for the Vite React SPA (frontend).
+#
+# No [redirects] needed: the SPA uses HashRouter (src/App.jsx), so there are
+# no client-side routes for a static host to rewrite.
+#
+# VITE_SIM_SERVICE is NOT set here on purpose: the service's public URL is
+# unknown until the Render deploy exists. It is configured as a Netlify
+# environment variable (see DEPLOYMENT.md, STEP B).
+
+[build]
+  command = "npm run build"
+  publish = "dist"

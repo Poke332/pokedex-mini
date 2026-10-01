@@ -100,8 +100,21 @@ export function dispatch(method, path, body) {
 // node:http server.
 import http from 'node:http';
 
+// CORS for cross-origin prod (Netlify SPA -> Render service). Wildcard is
+// safe: the API is stateless (in-memory rooms) and takes no cookies/auth.
+const CORS_HEADERS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+};
+
 export function buildApp() {
     return http.createServer((req, res) => {
+        if (req.method === 'OPTIONS') {
+            res.writeHead(204, CORS_HEADERS);
+            res.end();
+            return;
+        }
         const method = req.method;
         let body = {};
         let raw = '';
@@ -109,7 +122,7 @@ export function buildApp() {
         req.on('end', async () => {
             if (raw) { try { body = JSON.parse(raw); } catch { body = {}; } }
             const out = await dispatch(method, req.url.split('?')[0], body);
-            res.writeHead(out.status, { 'Content-Type': 'application/json' });
+            res.writeHead(out.status, { 'Content-Type': 'application/json', ...CORS_HEADERS });
             res.end(JSON.stringify(out.body));
         });
     });
