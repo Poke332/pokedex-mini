@@ -1,0 +1,236 @@
+// Showdown data lane — indexes the pokemon-showdown dataset so the party
+// builder (C5) can show tier-legal moves / abilities / items / natures per
+// species + format, in Showdown's own id dialect.
+//
+// NEW data model alongside the existing PokeAPI pipeline (IMPLEMENTATION.md §3
+// "Data lane"). Fetches from play.pokemonshowdown.com/data/ and is
+// deliberately NOT reconciled with the PokeAPI helpers in api.js. The
+// module-wide fetch-cache idiom follows api.js (bulkMovesPromise).
+//
+// The per-species+format record shape is pinned by the C2 contract
+// (docs/simulation-dto.md §4):
+//   record = { species, dexNum, types[], abilities[], moves[], items[],
+//              levelRange, natures[] }
+// `id` fields are lowercase Showdown ids; `name` fields are display strings.
+//
+// The module is browser-runnable (it lives beside api.js and is consumed by the
+// React SPA). No Node built-ins: the items.js CommonJS dump is evaluated in an
+// isolated (module, exports) scope via the Function constructor, which works in
+// both the browser and Node.
+
+const DATA_BASE = "https://play.pokemonshowdown.com/data";
+
+// The four live-served source files. pokedex/moves/learnsets are plain JSON;
+// items is a CommonJS object-literal dump (exports.BattleItems = {...};).
+// NOTE: per-gen override files under data/mods/<gen>/* are NOT served by the
+// live host (all 404). Per-generation legality is instead encoded inline in
+// learnsets.json as generation-prefixed tokens ("9M", "8L30", ...), so a single
+// master fetch covers every generation.
+const DATA_SOURCES = {
+    pokedex: `${DATA_BASE}/pokedex.json`,
+    moves: `${DATA_BASE}/moves.json`,
+    learnsets: `${DATA_BASE}/learnsets.json`,
+    items: `${DATA_BASE}/items.js`,
+};
+
+// The 25 in-game natures (Showdown `data/natures.ts`). Natures are not
+// species- or generation-gated, so every species+format exposes the same full
+// authoritative set; C2 §4 says "empty = any of the 25" and the UI filters to
+// its own useful subset — we emit the full 25 rather than leaving that to a
+// hardcoded constant in the UI.
+const ALL_NATURES = [
+    "adamant", "bashful", "bold", "brave", "calm", "careful", "docile", "gentle", "hardy",
+    "hasty", "impish", "jolly", "lax", "lonely", "mild", "modest", "naive", "naughty",
+    "quiet", "quirky", "rash", "relaxed", "sassy", "serious", "timid",
+];
+
+// C2 §4 pins the level input bounds (C1: default 100, range 5–100).
+const LEVEL_RANGE = { min: 5, max: 100 };
+
+// Showdown id convention: lowercase, strip all non-alphanumerics
+// ("Solar Power" -> "solarpower").
+const toID = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+const CURRENT_GEN = 9;
+
+// Extract the generation digit from a format id ("gen9ou" -> 9, "gen8uu" -> 8).
+// Falls back to the current gen when the format carries no gen prefix.
+export const genFromFormat = (formatId) => {
+    const m = /^gen(\d+)/.exec(String(formatId || ""));
+    return m ? Number(m[1]) : CURRENT_GEN;
+};
+
+// Evaluate a CommonJS object-literal dump (e.g. "exports.BattleItems = {...};")
+// without Node's vm module, so the same code runs in the browser. Fast path
+// tries plain JSON first (in case a source is ever served as .json).
+export const parseCommonJSDump = (text) => {
+    const trimmed = String(text || "").trim();
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        // fall through to the eval path
+    }
+    const mod = { exports: {} };
+    // The items dump is a plain object literal assigned to exports — safe to
+    // evaluate in an isolated scope (no imports, no Node globals).
+    new Function("module", "exports", trimmed)(mod, mod.exports);
+    return mod.exports;
+};
+
+// Fetch all four sources in parallel and normalize them into a raw index.
+// `fetchFn` is injectable for tests; defaults to the global fetch.
+export const fetchShowdownData = async (fetchFn = globalThis.fetch) => {
+    const [pokedex, moves, learnsets, itemsText] = await Promise.all([
+        fetchFn(DATA_SOURCES.pokedex).then((r) => r.json()),
+        fetchFn(DATA_SOURCES.moves).then((r) => r.json()),
+        fetchFn(DATA_SOURCES.learnsets).then((r) => r.json()),
+        fetchFn(DATA_SOURCES.items).then((r) => r.text()),
+    ]);
+    const itemsExport = parseCommonJSDump(itemsText);
+    const items = itemsExport && itemsExport.BattleItems ? itemsExport.BattleItems : itemsExport;
+    return { pokedex, moves, learnsets, items };
+};
+
+// ---------------------------------------------------------------------------
+// Pure index builders (unit-testable with synthetic in-memory data).
+// ---------------------------------------------------------------------------
+
+// Build the C2 §4 record for one species + format, or null if the species is
+// not in the pokedex. A learnset gap (forme not listed in learnsets.json) falls
+// back to the base species' learnset via pokedex `baseSpecies`.
+export const buildSpeciesRecord = (data, speciesId, formatId) => {
+    const { pokedex, moves, learnsets, items } = data;
+    const spKey = toID(speciesId);
+    const species = pokedex[spKey];
+    if (!species) return null;
+
+    const baseKey = species.baseSpecies ? toID(species.baseSpecies) : spKey;
+    const learnRec = learnsets[spKey] || (species.baseSpecies ? learnsets[baseKey] : null);
+
+    const gen = genFromFormat(formatId);
+    const genPrefix = String(gen);
+
+    // Abilities: pokedex abilities are keyed "0" (default), "1", "H" (hidden),
+    // each value being a display name. Derive the id, keep order, flag default.
+    const abilities = ["0", "1", "H"]
+        .filter((slot) => species.abilities && species.abilities[slot])
+        .map((slot) => ({
+            id: toID(species.abilities[slot]),
+            name: species.abilities[slot],
+            default: slot === "0",
+        }));
+
+    // Legal moves for this species + generation: a learnset token starting with
+    // the gen digit means "learnable in that gen". Only emit moves present in
+    // moves.json (with their type/category/power for the picker's badges).
+    const movesList = [];
+    if (learnRec && learnRec.learnset) {
+        for (const [moveId, tokens] of Object.entries(learnRec.learnset)) {
+            const arr = Array.isArray(tokens) ? tokens : [tokens];
+            const learnableInGen = arr.some(
+                (t) => typeof t === "string" && t.startsWith(genPrefix),
+            );
+            if (!learnableInGen) continue;
+            const mv = moves[moveId];
+            if (!mv) continue; // move dropped from the pool — not legal
+            movesList.push({
+                id: moveId,
+                name: mv.name,
+                type: mv.type ? String(mv.type).toLowerCase() : null,
+                category: mv.category,
+                // power only carries meaning for damaging moves; Status moves
+                // report 0 in the dump — normalize to null so a "—" badge reads
+                // as "no power", not "0".
+                power: mv.category === "Status" ? null : mv.basePower ?? null,
+            });
+        }
+        movesList.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    // Item pool for the generation: standard items (not Past/Future/CAP/Custom)
+    // whose availability generation is <= the target gen. "" = "No item".
+    const itemIds = Object.keys(items)
+        .filter((id) => {
+            const it = items[id];
+            return it && !it.isNonstandard && it.gen != null && it.gen <= gen;
+        })
+        .sort((a, b) => (items[a].name || a).localeCompare(items[b].name || b));
+    const itemPool = ["", ...itemIds];
+
+    return {
+        species: species.name,
+        dexNum: species.num ?? null,
+        types: (species.types || []).map((t) => String(t).toLowerCase()),
+        abilities,
+        moves: movesList,
+        items: itemPool,
+        levelRange: LEVEL_RANGE,
+        natures: ALL_NATURES.slice(),
+    };
+};
+
+// All species ids present in the pokedex (for the search-to-add list).
+export const buildSpeciesList = (data) => Object.keys(data.pokedex).sort();
+
+// The pinned C2 §4 nested shape for one species across several formats:
+// { [formatId]: record|null }
+export const buildSpeciesRecordsForFormats = (data, speciesId, formatIds) => {
+    const out = {};
+    for (const f of formatIds) out[f] = buildSpeciesRecord(data, speciesId, f);
+    return out;
+};
+
+// The exact C2 §4 top-level shape: { [speciesId]: { [formatId]: record|null } }.
+// This is what the party builder queries: pass the species it wants to show and
+// the formats in its selector, get back per-format legal sets.
+export const buildRecordsForSpecies = (data, speciesIds, formatIds) => {
+    const out = {};
+    for (const sp of speciesIds) out[sp] = buildSpeciesRecordsForFormats(data, sp, formatIds);
+    return out;
+};
+
+// ---------------------------------------------------------------------------
+// Module-wide fetch cache (same idea as api.js bulkMovesPromise).
+// ---------------------------------------------------------------------------
+
+let indexPromise = null;
+
+// Ensure the raw index is fetched (once) and return it.
+export const loadShowdownIndex = (fetchFn = globalThis.fetch) => {
+    if (!indexPromise) {
+        indexPromise = fetchShowdownData(fetchFn).then((data) => {
+            if (!data || !data.pokedex || !data.moves || !data.learnsets || !data.items) {
+                throw new Error("showdown index: incomplete fetch");
+            }
+            return data;
+        }).catch((err) => {
+            indexPromise = null; // allow retry after a failure
+            throw err;
+        });
+    }
+    return indexPromise;
+};
+
+// --- high-level async accessors (resolve the cache, then build records) -----
+export const getSpeciesRecord = async (speciesId, formatId, fetchFn) => {
+    const data = await loadShowdownIndex(fetchFn);
+    return buildSpeciesRecord(data, speciesId, formatId);
+};
+
+// { [formatId]: record|null } for a species across the given formats.
+export const getSpeciesRecordsForFormats = async (speciesId, formatIds, fetchFn) => {
+    const data = await loadShowdownIndex(fetchFn);
+    return buildSpeciesRecordsForFormats(data, speciesId, formatIds);
+};
+
+// All species ids.
+export const getSpeciesList = async (fetchFn) => {
+    const data = await loadShowdownIndex(fetchFn);
+    return buildSpeciesList(data);
+};
+
+// Exact C2 §4 top-level shape: { [speciesId]: { [formatId]: record|null } }.
+export const getRecordsForSpecies = async (speciesIds, formatIds, fetchFn) => {
+    const data = await loadShowdownIndex(fetchFn);
+    return buildRecordsForSpecies(data, speciesIds, formatIds);
+};
