@@ -11,6 +11,7 @@ import MovesPage from "./pages/MovesPage.jsx"
 import MoveDetailPage from "./pages/MoveDetailPage.jsx"
 import MachinesPage from "./pages/MachinesPage.jsx"
 import MachineDetailPage from "./pages/MachineDetailPage.jsx"
+import PartyPage from "./pages/PartyPage.jsx"
 import {Routes, Route, HashRouter} from "react-router-dom"
 
 function App() {
@@ -30,6 +31,7 @@ function App() {
           <Route path="move/:name" element={<MoveDetailPage />} />
           <Route path="machines" element={<MachinesPage />} />
           <Route path="machine/:id" element={<MachineDetailPage />} />
+          <Route path="party" element={<PartyPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

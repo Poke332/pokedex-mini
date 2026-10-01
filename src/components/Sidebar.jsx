@@ -13,10 +13,13 @@ const NAV_SECTIONS = [
         ],
     },
     {
-        // Empty for now — simulation pages are still to be built. The
-        // header stays so the two-part structure is visible.
+        // Simulation — /party is live (C5); /battle's route lands with C6
+        // (the nav entry is pre-placed so C6's idempotent check just skips).
         title: "Simulation",
-        items: [],
+        items: [
+            { to: "/party", label: "Party" },
+            { to: "/battle", label: "Battle" },
+        ],
     },
 ];
 
@@ -56,8 +59,13 @@ function Brand() {
 export default function Sidebar() {
     return (
         <>
-            {/* Mobile: brand + horizontally scrolling nav chips */}
-            <div className="md:hidden">
+            {/* Mobile: brand + horizontally scrolling nav chips.
+                The wrapper is a flex item in Layout's root row — without
+                min-w-0 it sizes to the chips' content width (~900px) and
+                widens the whole document at 390px (the nav's own
+                overflow-x-auto only scrolls inside its box). Containing it
+                keeps every page h-scroll-free at 390 (C1 §2.5). */}
+            <div className="min-w-0 overflow-hidden md:hidden">
                 <Brand />
                 <nav
                     aria-label="Primary"
