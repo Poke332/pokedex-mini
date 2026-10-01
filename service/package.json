@@ -1,0 +1,14 @@
+{
+  "name": "pokedex-sim-service",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "C4 — Node service wrapping pokemon-showdown's Sim.BattleStream. One battle room = one stream. Driven one-turn-at-a-time over the C2 endpoint contract (docs/simulation-dto.md).",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/sim.test.js"
+  },
+  "dependencies": {
+    "pokemon-showdown": "^0.11.11"
+  }
+}
