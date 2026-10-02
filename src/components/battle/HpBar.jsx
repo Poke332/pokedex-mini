@@ -33,7 +33,7 @@ export default function HpBar({ mon, name, size = "lg" }) {
             className={`w-full overflow-hidden rounded-full bg-neutral-100 ${tall ? "h-2" : "h-1"}`}
         >
             <div
-                className={`h-full rounded-full transition-[width] duration-500 ease-out ${fainted ? "bg-neutral-300" : hpBarClass(fraction)}`}
+                className={`bs-hp-fill h-full rounded-full transition-[width] duration-500 ease-out ${fainted ? "bg-neutral-300" : hpBarClass(fraction)}`}
                 style={{ width: `${fainted ? 0 : fraction * 100}%` }}
             />
         </div>

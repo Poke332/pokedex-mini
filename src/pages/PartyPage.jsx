@@ -1,10 +1,10 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { getSpeciesList, getRecordsForSpecies } from "../utils/showdownData";
+import { getSpeciesListForGen, getRecordsForSpecies, genFromFormat } from "../utils/showdownData";
 import { blankSet, buildTeam } from "../utils/pokemonSets";
 import { loadParty, saveParty, resetParty } from "../utils/partyStore";
 import { validateTeam } from "../utils/simService";
-import { PARTY_FORMATS, unresolvedMoves } from "../utils/party";
+import { PARTY_FORMATS, unresolvedMoves, setFormatIssues } from "../utils/party";
 import SearchBar from "../components/SearchBar";
 import EmptySlotCard from "../components/party/EmptySlotCard";
 import FilledSlotCard from "../components/party/FilledSlotCard";
@@ -43,7 +43,12 @@ export default function PartyPage() {
 
     // --- party state (hydrated from versioned localStorage on first render) ---
     const [party] = useState(loadParty);
-    const [format, setFormat] = useState(party.format);
+    // G2 back-compat: a stored format still in PARTY_FORMATS loads as-is; a
+    // format id that no longer exists in the list (an old/foreign value)
+    // falls back to the default instead of leaving a blank select.
+    const [format, setFormat] = useState(
+        () => (PARTY_FORMATS.some((f) => f.id === party.format) ? party.format : PARTY_FORMATS[0].id),
+    );
     const [team, setTeam] = useState(party.team);
 
     // --- SHOWDOWN data lane (species list + per-format records) -------------
@@ -83,12 +88,20 @@ export default function PartyPage() {
         saveParty({ format, team });
     }, [format, team]);
 
-    // Species list for the add section (module-wide cache in the data lane).
-    // The lane-error banner keys off `format` (laneErrorFor === format), so a
-    // stale error from a previous format never shows; no synchronous reset.
+    // Species pool for the add section (module-wide cache in the data lane).
+    // G4 (single-gen window): the pool is gated by the SELECTED format's
+    // generation — getSpeciesListForGen keeps ONLY that gen's introductions
+    // (the dex-num window (end[G-1], end[G]] — G2's cumulative "num <= end[G]"
+    // is gone, so a Gen 9 pool never lists Garchomp/Abomasnow and a Gen 5
+    // pool never lists Ogerpon/Palafin). Forme sub-ids without a `num`
+    // (37 of them) are dropped; an unknown gen yields an empty pool, not a
+    // fallback. When the format changes the effect re-runs and the pool
+    // re-filters to the new gen's window. The lane-error banner keys off
+    // `format` (laneErrorFor === format), so a stale error from a previous
+    // format never shows; no synchronous reset.
     useEffect(() => {
         let cancelled = false;
-        getSpeciesList()
+        getSpeciesListForGen(genFromFormat(format))
             .then((ids) => { if (!cancelled) setSpeciesList(ids); })
             .catch(() => { if (!cancelled) setLaneErrorFor(format); });
         return () => { cancelled = true; };
@@ -112,6 +125,20 @@ export default function PartyPage() {
         () => [...new Set([...team.map((t) => t.species), ...visibleCandidateIds])].filter(Boolean).join(","),
         [team, visibleCandidateIds],
     );
+
+    // G4 (single-gen window) format-switch re-gate. Team members whose species
+    // falls outside the picked format's generation window (dex `num` below
+    // the floor or above the end — e.g. a Garchomp stored in a Gen 9 team)
+    // are surfaced as per-set problems — NOT silently dropped.
+    // Advisory until the lane records resolve (null record -> no report); the
+    // service validator remains the final authority on start.
+    const genProblems = useMemo(() => {
+        const gen = genFromFormat(format);
+        return team
+            .map((s) => s && s.species ? setFormatIssues(s, records[s.species], gen) : null)
+            .filter(Boolean);
+    }, [team, records, format]);
+
     useEffect(() => {
         if (!wantedKey) return;
         const ids = wantedKey.split(",");
@@ -149,6 +176,19 @@ export default function PartyPage() {
         if (editingIndex === i) { setEditingIndex(null); setDraft(null); }
         setTeam((t) => t.filter((_, idx) => idx !== i));
     };
+    // G4 (single-gen window) format switch: keep the whole team — only the
+    // selected format changes. The lane re-queries records for the new format
+    // (the wantedKey effect re-keys on `format`), the picker re-filters to the
+    // new gen's single-gen pool, and team members outside that gen's window
+    // are surfaced by `genProblems` below (never dropped). Page counter is
+    // reset so the re-filtered pool opens at page 1, and the service-level
+    // problems are cleared (the team has not been re-validated yet).
+    const onFormatChange = (e) => {
+        setFormat(e.target.value);
+        setProblems([]);
+        setQuery("");
+        setPage(1);
+    };
     const openEditor = (i) => {
         setEditingIndex(i);
         setDraft({ ...hydrateSet(team[i], records[team[i]?.species]) });
@@ -172,12 +212,19 @@ export default function PartyPage() {
 
     // --- start battle (C4 gate) ------------------------------------------------
     const teamComplete = team.length > 0 && team.every((s) => (s.moves || []).filter(Boolean).length === 4);
+    // G2: the advisory problem display is the service-level `problems` plus the
+    // lane-level per-set re-gate mismatches (genProblems — team members whose
+    // species is not available in the picked gen; never dropped, surfaced at
+    // load + on every format switch). Start is blocked on either.
+    const displayProblems = problems.concat(genProblems);
     const startBattle = async () => {
-        if (!team.length || !teamComplete || validating) return;
+        if (!team.length || !teamComplete || displayProblems.length > 0 || validating) return;
         setValidating(true);
         setProblems([]);
         try {
-            const result = await validateTeam(buildTeam(team), format);
+            // D1 (fix 4): resolve form-gated species against the current-format
+            // records (base form + equipped gate item → the transformed form).
+            const result = await validateTeam(buildTeam(team, records), format);
             if (!result.reachable) {
                 setProblems(["Battle service unreachable — start the sim service and retry."]);
                 return;
@@ -213,6 +260,14 @@ export default function PartyPage() {
         n: s ? unresolvedMoves(s, records[s.species]) : 0,
     }));
 
+    // G4 (single-gen window): the legibility line for the generation gate.
+    // The picker's species pool is re-filtered to ONLY this format's gen's
+    // introductions (getSpeciesListForGen's num window), so an empty/short
+    // list reads as "only this generation's Pokémon", not "broken".
+    const gateGen = genFromFormat(format);
+    const gateFormatLabel = PARTY_FORMATS.find((f) => f.id === format)?.label || format;
+    const genGateHint = `${gateFormatLabel} — Gen ${gateGen} Pokémon only`;
+
     const addSection = (
         <section id="add-to-party" aria-label="Add to party" className="w-full border border-neutral-200 bg-white p-4 rounded-lg">
             <div className="flex flex-col gap-3">
@@ -220,6 +275,10 @@ export default function PartyPage() {
                     {team.length ? "Add to party" : "Search for your first Pokémon"}
                 </h2>
                 <SearchBar onSearch={(q) => { setQuery(q); setPage(1); }} placeholder="Search Pokémon by name" />
+                {/* G4 (single-gen window): the generation gate in plain words
+                    — the pool below is ONLY this format's gen's introductions,
+                    so name the window instead of a mystery short list. */}
+                <p className="text-xs text-neutral-400">{genGateHint}</p>
                 {!speciesList
                     ? <p className="text-sm text-neutral-500">Loading Pokémon list…</p>
                     : query.trim()
@@ -294,6 +353,15 @@ export default function PartyPage() {
         </div>
     );
 
+    // G2: render the format list grouped by generation (PARTY_FORMATS is
+    // pre-grouped: all of a gen's tiers are contiguous, newest-first).
+    const formatGroups = [];
+    for (const f of PARTY_FORMATS) {
+        const last = formatGroups[formatGroups.length - 1];
+        if (last && last.group === f.group) last.items.push(f);
+        else formatGroups.push({ group: f.group, items: [f] });
+    }
+
     return (
         <main className="min-h-dvh flex flex-col bg-neutral-50 text-neutral-900">
             {/* Header band (C1 §2.1) */}
@@ -304,11 +372,16 @@ export default function PartyPage() {
                         Format
                         <select
                             value={format}
-                            onChange={(e) => { setFormat(e.target.value); setProblems([]); }}
+                            onChange={onFormatChange}
+                            aria-label="Battle format"
                             className="ml-2 min-h-11 rounded-lg border border-blue-600 bg-blue-900 px-3 py-2.5 text-sm font-medium text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
                         >
-                            {PARTY_FORMATS.map((f) => (
-                                <option key={f.id} value={f.id}>{f.label}</option>
+                            {formatGroups.map((g) => (
+                                <optgroup key={g.group} label={g.group}>
+                                    {g.items.map((f) => (
+                                        <option key={f.id} value={f.id}>{f.label}</option>
+                                    ))}
+                                </optgroup>
                             ))}
                         </select>
                     </label>
@@ -360,7 +433,7 @@ export default function PartyPage() {
                             <button
                                 type="button"
                                 onClick={startBattle}
-                                disabled={!team.length || !teamComplete || validating}
+                                disabled={!team.length || !teamComplete || displayProblems.length > 0 || validating}
                                 className="min-h-11 w-full rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 md:w-auto"
                             >
                                 {validating ? "Checking team…" : "Start battle"}
@@ -370,7 +443,9 @@ export default function PartyPage() {
                                     ? "Add at least 1 Pokémon"
                                     : !teamComplete
                                         ? "Every set needs 4 moves"
-                                        : "Team is validated against the sim service before the battle starts"}
+                                        : displayProblems.length > 0
+                                            ? "Fix the problems below before the battle can start"
+                                            : "Team is validated against the sim service before the battle starts"}
                             </p>
                         </div>
                         {problems.length > 0 && (
@@ -378,6 +453,21 @@ export default function PartyPage() {
                                 <p className="text-sm font-semibold text-red-600">Team is not ready:</p>
                                 <ul className="mt-1 list-inside list-disc text-sm text-red-600">
                                     {problems.map((p, i) => <li key={i}>{p}</li>)}
+                                </ul>
+                            </div>
+                        )}
+                        {/* G2: the lane-level re-gate — team members whose species
+                            is not available in the picked format's generation.
+                            Shown at load AND on every format switch (never
+                            cleared by the service pass); the team is kept, each
+                            offending set is named, and Start stays blocked. */}
+                        {genProblems.length > 0 && (
+                            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                                <p className="text-sm font-semibold text-amber-800">
+                                    Not available in {gateFormatLabel}:
+                                </p>
+                                <ul className="mt-1 list-inside list-disc text-sm text-amber-800">
+                                    {genProblems.map((p, i) => <li key={i}>{p}</li>)}
                                 </ul>
                             </div>
                         )}
@@ -391,7 +481,7 @@ export default function PartyPage() {
                 <button
                     type="button"
                     onClick={startBattle}
-                    disabled={!team.length || !teamComplete || validating}
+                    disabled={!team.length || !teamComplete || displayProblems.length > 0 || validating}
                     className="min-h-11 flex-1 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                     {validating ? "Checking team…" : "Start battle"}

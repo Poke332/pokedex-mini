@@ -20,6 +20,7 @@ import TypeBadge from "../TypeBadge";
  *   onSelect: (index: number|null) => void,
  *   onStart: () => void,
  *   busy: boolean,
+ *   secondLead?: object|null,
  * }} props
  *   team     — the caller's team (C2 §1 sets, index = team position).
  *   records  — the C2 §4 record per species id (sprite/dex/types), or null
@@ -29,17 +30,27 @@ import TypeBadge from "../TypeBadge";
  *   onSelect — pick / deselect a lead.
  *   onStart  — commit the lead (`teampreview <i>`) and enter the battle.
  *   busy     — the service is creating the room / committing the lead.
+ *   secondLead — P4 (doubles): the team set the sim will auto-field as the
+ *     2nd active once a lead is picked (a PREVIEW — the C2 choice string
+ *     ships one lead only; the service fills the rest deterministically).
+ *     Shown as a quiet "2nd active" row when set + a lead is selected.
  */
 export default function TeamPreviewGrid({
-    team, records, selected, format, onSelect, onStart, busy,
+    team, records, selected, format, onSelect, onStart, busy, secondLead,
 }) {
     const canStart = selected != null && !busy;
+    // P4 (doubles): which card the sim will auto-field as the 2nd active.
+    // `secondLead` is the team set (identity from `team`), so indexOf is the
+    // exact card index. Only meaningful when a lead is already selected.
+    const secondIdx = secondLead ? team.indexOf(secondLead) : null;
+    const showSecond = selected != null && secondIdx != null;
     return (
         <div className="flex w-full flex-col gap-5">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {team.map((set, i) => {
                     const rec = records?.[set.species] || null;
                     const isLead = selected === i;
+                    const isSecond = showSecond && i === secondIdx;
                     const dex = rec?.dexNum;
                     const types = rec?.types || [];
                     const ability = rec?.abilities?.find((a) => a.id === set.ability)?.name
@@ -50,16 +61,23 @@ export default function TeamPreviewGrid({
                             type="button"
                             onClick={() => onSelect(isLead ? null : i)}
                             aria-pressed={isLead}
-                            aria-label={`${rec?.species || toProperCase(set.species)}${isLead ? ", lead" : ""}`}
+                            aria-label={`${rec?.species || toProperCase(set.species)}${isLead ? ", lead" : isSecond ? ", second active" : ""}`}
                             className={`relative w-full rounded-lg border bg-white p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 ${
                                 isLead
                                     ? "border-red-600 ring-2 ring-red-600 ring-offset-2"
-                                    : "border-neutral-200 hover:border-blue-800 hover:bg-blue-50 cursor-pointer"
+                                    : isSecond
+                                        ? "border-blue-800 ring-1 ring-blue-800 ring-offset-2"
+                                        : "border-neutral-200 hover:border-blue-800 hover:bg-blue-50 cursor-pointer"
                             }`}
                         >
                             {isLead && (
                                 <span className="absolute right-3 top-3 rounded-full bg-red-600 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-white">
                                     Lead
+                                </span>
+                            )}
+                            {isSecond && !isLead && (
+                                <span className="absolute right-3 top-3 rounded-full bg-blue-800 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-white">
+                                    2nd Active
                                 </span>
                             )}
                             <div className="flex items-start gap-3">
@@ -114,7 +132,17 @@ export default function TeamPreviewGrid({
                 <p className="text-sm text-neutral-500">
                     {selected == null
                         ? "Pick a lead — your lead acts first in the opening turn"
-                        : "The lead is locked once the battle starts"}
+                        : showSecond
+                            ? (
+                                <>
+                                    Lead locked. 2nd active auto-picked:{" "}
+                                    <span className="font-semibold text-neutral-800">
+                                        {records?.[secondLead?.species]?.species
+                                            || toProperCase(secondLead?.species)}
+                                    </span>
+                                </>
+                            )
+                            : "The lead is locked once the battle starts"}
                     <span className="ml-2 rounded-full bg-neutral-100 px-2 py-0.5 text-xs font-semibold text-neutral-600">
                         {format}
                     </span>

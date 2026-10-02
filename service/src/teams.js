@@ -12,6 +12,7 @@
 
 import crypto from 'node:crypto';
 import showdown from 'pokemon-showdown';
+import { httpError } from './errors.js';
 
 const { Teams, TeamValidator, toID } = showdown;
 
@@ -57,6 +58,10 @@ export function packTeam(team) {
 }
 
 // Generate a legal default team for the tier (used when the caller supplies no p2).
+// Cross-gen fallback: if the TARGET gen's randombattle generator throws,
+// propagate a 4xx with the exact format id in `problems` — NEVER silently
+// substitute a different generation (the old catch hardcoded gen9randombattle,
+// which is how a gen6 battle could end up with a gen9 default opponent).
 export function generateTeam(format, seed, size = 6) {
     const gen = genFromFormat(format);
     const randFmt = randomBattleFormatFor(format, gen);
@@ -65,7 +70,9 @@ export function generateTeam(format, seed, size = 6) {
     try {
         return Teams.generate(randFmt, Object.assign({ teamSize: size }, opts));
     } catch {
-        return Teams.generate('gen9randombattle', Object.assign({ teamSize: size }, opts));
+        throw httpError(422, 'invalid team', {
+            problems: [`could not generate a default team for format ${toID(format)}`],
+        });
     }
 }
 

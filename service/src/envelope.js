@@ -130,10 +130,14 @@ export function buildEnvelope(battle, rqid) {
     const bench = p1.pokemon.filter((p) => !p.isActive).map((p) => benchMon(p, p1, dex));
 
     const cr = choiceRequestFor(battle, p1, dex, rqid);
-    let foe = null;
-    if (!over && cr.state !== 'teampreview' && cr.state !== 'wait' && p2.active && p2.active[0]) {
-        foe = foeMon(p2.active[0], p2, dex);
-    }
+    // The caller's two foes in doubles: one FoeMon per p2 active slot, ordered
+    // by position (empty slots skipped, same rule as `active` above). ADDITIVE
+    // to the C2 §2 wire: `foe` stays `foes[0]` (singles: single element), so
+    // every existing consumer keeps its shape.
+    const foes = (!over && cr.state !== 'teampreview' && cr.state !== 'wait' && p2.active)
+        ? p2.active.filter((p) => p).map((p) => foeMon(p, p2, dex))
+        : [];
+    const foe = foes[0] || null;
 
     let winner = null;
     if (over) {
@@ -146,6 +150,7 @@ export function buildEnvelope(battle, rqid) {
         active,
         bench,
         foe,
+        foes,
         log: [], // the room attaches that turn's slice
         choiceRequest: cr,
         battleOver: over,

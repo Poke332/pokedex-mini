@@ -4,6 +4,14 @@
 // p1 and submits a choice; the opponent p2 is driven autonomously (deterministic
 // when a seed is supplied, so a reviewer can assert winner + turn count from the
 // end LOGDATA per IMPLEMENTATION.md §7). Only that turn's envelope ships back.
+//
+// DOUBLES (gen9doublesou, format.gameType === 'doubles'): each side fields TWO
+// actives, so a Showdown choice token is one sub-token PER PENDING ACTIVE,
+// comma-joined ("move <id> <loc>, move" | "switch N, move"). The caller's token
+// carries their sub-choice first; the remaining pending actives are auto-filled
+// with bare 'move' / 'switch' sub-tokens (the sim's autoChoose determinism). A
+// target sub-token only needs a location for foe/ally-targeting move types —
+// self-typed moves ship no target.
 
 import { BattleStream, getPlayerStreams } from './deps.js';
 import {
@@ -11,6 +19,15 @@ import {
 } from './teams.js';
 import { httpError } from './errors.js';
 import { buildEnvelope } from './envelope.js';
+
+// Move target types that take a TARGET LOCATION sub-token ("move <id> <loc>"),
+// where <loc> is the signed relative position (0 = auto, +1/+2 = first/second
+// foe, -1/-2 = ally/self). Mirrors the sim's CHOOSABLE_TARGETS
+// (battle-actions.ts:3) exactly: every other target type (self / side / all /
+// randomNormal …) rejects an explicit location ("can't choose a target").
+const LOC_TARGETS = new Set([
+    'normal', 'any', 'adjacentFoe', 'adjacentAlly', 'adjacentAllyOrSelf',
+]);
 
 // A single BattleStream room.
 export class BattleRoom {
@@ -119,10 +136,19 @@ export class BattleRoom {
         return this._finalize();
     }
 
+    // True for gen* doubles formats (`battle.format.gameType === 'doubles'` —
+    // the sim's own field, reliable for gen9doublesou & co.).
+    _isDoubles() {
+        return !!(this.battle && this.battle.format && this.battle.format.gameType === 'doubles');
+    }
+
     // C2 choice string -> Showdown choice token for p1.
     //   teampreview <i> (0-based)  -> team <i+1>
     //   move <id>                  -> move <id>
     //   switch <i> (0-based pos)   -> switch <i+1>
+    // DOUBLES: a choice covers ONE PENDING ACTIVE per sub-token, comma-joined —
+    // the caller's pick first, then a bare auto-fill ('move'/'switch') per
+    // remaining active. The bare fill is the sim's autoChoose: deterministic.
     _translateChoice(rs, choiceStr) {
         const s = choiceStr.trim();
         if (rs === 'teampreview') {
@@ -130,12 +156,99 @@ export class BattleRoom {
             const idx = m && m[1] !== undefined ? Number(m[1]) : 0;
             return `team ${idx + 1}`;
         }
-        if (/^move\b/.test(s)) return s;                 // "move <id>" passthrough
-        if (/^switch\b/.test(s)) {
-            const idx = Number(s.replace(/^switch\b\s*/i, '').trim());
-            return Number.isInteger(idx) ? `switch ${idx + 1}` : 'default';
+        if (!this._isDoubles()) {
+            if (/^move\b/.test(s)) return s;                 // "move <id>" passthrough
+            if (/^switch\b/.test(s)) {
+                const idx = Number(s.replace(/^switch\b\s*/i, '').trim());
+                return Number.isInteger(idx) ? `switch ${idx + 1}` : 'default';
+            }
+            return 'default';
         }
-        return 'default';
+        return this._doublesToken(rs, s, this.battle.sides[0]);
+    }
+
+    // Doubles token builder. The sim wants ONE sub-token PER ACTIVE SLOT
+    // (the full `p1.activeRequest.active` array in move state, or the
+    // `forceSwitch` table in switch state), comma-joined — `choose()`
+    // processes them in slot order and `isChoiceDone` requires an action
+    // for every active. The caller's pick lands on the FIRST slot that
+    // owns the pending choice; the other slots get a deterministic
+    // auto-fill sub-token (bare 'move' = autoChoose, 'pass' = a free/empty
+    // slot, bare 'switch' = an additional forced slot).
+    _doublesToken(rs, s, p1) {
+        if (rs === 'switch') {
+            // switch-state request = { forceSwitch: [bool, bool], side }
+            // (battle.ts getRequests). One sub-token per active slot: the
+            // caller's switch on the first forced slot, a bare 'switch'
+            // (autoChoose bench) on any further forced slot, 'pass' on free
+            // slots. A bare 'switch' on a FREE slot would autoChoose a bench
+            // mon, so free slots must 'pass'.
+            const force = (p1.activeRequest && p1.activeRequest.forceSwitch) ||
+                (p1.active || []).map((pk) => !!(pk && pk.switchFlag));
+            const m = /^switch\s+(\d+)$/.exec(s.trim());
+            const callerTok = m ? `switch ${Number(m[1]) + 1}` : 'switch';
+            let ownerUsed = false;
+            return force.map((f) => {
+                if (!f) return 'pass';
+                if (!ownerUsed) { ownerUsed = true; return callerTok; }
+                return 'switch';
+            }).join(', ');
+        }
+        // move state (and anything else the sim routes to p1 in doubles)
+        const m = /^move\s+(\S+)(?:\s+([+-]?\d+))?$/.exec(s.trim());
+        let callerTok;
+        if (!m || m[1] === '0') {
+            callerTok = 'move';                              // auto pick + auto target
+        } else {
+            const moveId = toID(m[1]);
+            // Named move: a C2 explicit target-loc (m[2]) passes through. When
+            // the C2 choice carries none (id-only — the SPA dialect), we supply
+            // a default target-loc ONLY for target-needing move types. In
+            // doubles a CHOOSABLE move with no target-loc is rejected by the
+            // sim ("needs a target"), so we must emit a non-zero valid loc;
+            // non-choosable move types reject any explicit target, so they
+            // ship no suffix at all.
+            const src = p1.active[0];
+            let loc;
+            if (m[2] !== undefined) {
+                loc = Number(m[2]);                        // C2 explicit target-loc passes through
+            } else {
+                loc = this._defaultTargetLoc(moveId, src);
+                // A target-needing move with no writable non-zero target-loc
+                // (the resolver returns null): the named move can't be
+                // addressed, so fall back to a bare auto-pick for this slot.
+                if (loc === null) { callerTok = 'move'; }
+            }
+            if (loc !== null && callerTok !== 'move') {
+                const locText = loc === 0 ? '' : (loc > 0 ? `+${loc}` : String(loc));
+                callerTok = `move ${moveId}${locText ? ' ' + locText : ''}`;
+            }
+        }
+        const reqActive = ((p1.activeRequest && p1.activeRequest.active) || []);
+        return reqActive.map((e, i) => (i === 0 ? callerTok : (e ? 'move' : 'pass'))).join(', ');
+    }
+
+    // Default target-loc for the caller's move in doubles. Choosable target
+    // types (mirror the sim's CHOOSABLE_TARGETS, battle-actions.ts:3) need a
+    // NON-zero loc — the sim's token grammar only writes ±1..±3 (0 is not a
+    // writable suffix). We pick the nearest legal foe (+1/+2) or ally/self
+    // (-1/-2) via battle.validTargetLoc.
+    //   - non-locatable target type   -> 0      (ship no suffix; sim auto-resolves)
+    //   - locatable but none writable -> null   (caller falls back to bare 'move')
+    _defaultTargetLoc(moveId, src) {
+        if (!moveId || !src) return 0;
+        const md = this.battle.dex.moves.get(moveId);
+        if (!md) return 0;
+        const target = String(md.target || '');
+        if (!LOC_TARGETS.has(target)) return 0;        // not target-needing: no suffix
+        const foe = target !== 'adjacentAlly' && target !== 'adjacentAllyOrSelf';
+        const candidates = foe ? [1, 2, -1, -2] : [-1, -2, 1, 2];
+        for (const loc of candidates) {
+            try {
+                if (this.battle.validTargetLoc(loc, src, target)) return loc;
+            } catch { /* try the next candidate */ }
+        }
+        return null;                                    // target-needing, none writable
     }
 
     // ----------------------------------------------------------------- state()

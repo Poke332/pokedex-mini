@@ -7,10 +7,13 @@
 
 /**
  * Parse the C2 §2.4 condition grammar ("100/100", "73/100 par", "0/100 fnt").
+ * The live sim writes status tails as brn/par/slp/frz/psn/tox
+ * (verified against the shipped service); the legacy C2 doc spellings
+ * (brk/sleep/toxic) still parse — the label layer maps both.
  * @param {string} condition the mon's `condition` field.
  * @returns {{fraction:number, status:string, fainted:boolean}}
  *   fraction — hp/maxhp in [0,1]; clamped, 0 on garbage input.
- *   status   — the status id ("" | par | brk | psn | sleep | frz | toxic), or
+ *   status   — the status id ("" | brn | par | slp | frz | psn | tox), or
  *     "fainted" when the fraction is 0.
  *   fainted  — true when the mon is at 0 hp.
  */
@@ -25,20 +28,27 @@ export function parseCondition(condition) {
     return { fraction, status, fainted };
 }
 
-// Status id -> UI copy + a11y label (C1 §3.2 status icon row).
+// Status ids -> UI copy + a11y label (C1 §3.2 status icon row).
+// The live sim (pokemon-showdown dist/data/conditions.js) uses these ids —
+// verified against the shipped service, never memory: brn/par/slp/frz/psn/tox.
+// The C2 doc spelled them brk/sleep/toxic; the legacy spellings stay mapped
+// too, so either wire token resolves.
 const STATUS_LABELS = {
     par: "Paralyzed",
     brk: "Burned",
+    brn: "Burned",
     psn: "Poisoned",
     sleep: "Asleep",
+    slp: "Asleep",
     frz: "Frozen",
     toxic: "Badly poisoned",
+    tox: "Badly poisoned",
     fainted: "Fainted",
 };
 
 /**
  * Human label for a status id from parseCondition().status.
- * @param {string} status id ("", par, brk, …, "fainted").
+ * @param {string} status id ("" or par, brk/brn, psn, sleep, frz, toxic, fainted).
  * @returns {string} "" when there is no status.
  */
 export function statusLabel(status) {
@@ -105,18 +115,49 @@ const RE_FAINT = /^\|faint\|/;
 const RE_TURN = /^\|turn\|(\d+)$/;
 const RE_EMPTY = /^\|\s*$/;
 
-// Protocol-internal lines: dropped from the display log entirely.
-const HIDDEN_EVENTS = new Set([
-    "split", "upkeep", "gametype", "player", "teamsize", "side", "name",
-    "win", "start", "res", "notime",
+// The C1 §3.2 human events, and only those. Anything parseLogLine's switch
+// does NOT recognize (|request|{...}, |t:| timestamps, stat-block chunks,
+// |upkeep|, |gametype| variants, …) is protocol noise: it is hidden from the
+// log, never rendered as an "info" line.
+const DISPLAY_EVENTS = new Set([
+    "turn", "faint",
+    "move", "switch", "-switch",
+    "status", "-status", "clearstatus", "-clearstatus",
+    "-damage", "-heal",
+    "immune", "-immune",
+    "-boost", "-unboost", "-ability",
+    "weather", "-weather",
 ]);
 
 // Status ids -> the word Showdown's display code uses for the condition.
+// The live sim emits brn/par/slp/frz/psn/tox (verified against the shipped
+// service + pokemon-showdown dist/data/conditions.js); the legacy C2
+// spellings (brk/sleep/toxic) map too, so either wire token resolves.
 const STATUS_WORDS = {
-    par: "paralyzed", brk: "burned", psn: "poisoned",
-    sleep: "fell asleep", frz: "was frozen", toxic: "badly poisoned",
+    par: "paralyzed",
+    brk: "burned", brn: "burned",
+    psn: "poisoned",
+    sleep: "fell asleep", slp: "fell asleep",
+    frz: "was frozen",
+    toxic: "badly poisoned", tox: "badly poisoned",
     flinch: "flinched",
 };
+
+// Stat ids -> the word Showdown's display code uses. The live sim ships raw
+// stat ids in -boost/-unboost (pokemon.js boosts keys:
+// atk/def/spa/spd/spe/accuracy/evasion); D4 check 1 is ZERO raw tokens, so
+// each maps to its display word. `acc`/`eva` are the C2 doc spellings.
+const STAT_WORDS = {
+    atk: "Attack", def: "Defense",
+    spa: "Sp. Atk", spd: "Sp. Def", spe: "Speed",
+    accuracy: "Accuracy", acc: "Accuracy",
+    evasion: "Evasion", eva: "Evasion",
+};
+
+function statWord(id) {
+    const w = STAT_WORDS[String(id || "")];
+    return w !== undefined ? w : String(id || "");
+}
 
 /**
  * One rendered log row: { kind: "turn"|"faint"|"info", text, turn? }.
@@ -163,36 +204,59 @@ export function parseLogLine(raw) {
         }
         case "clearstatus":
         case "-clearstatus":
-            return { kind: "info", text: who ? `${who}'s ${parts[1]} was removed` : "The status was removed" };
-        case "-damage": {
-            const hp = parts[1] ? ` (${parts[1]})` : "";
-            return { kind: "info", text: who ? `${who} took damage${hp}` : "A Pokémon took damage" };
+        case "-curestatus": {
+            // Sim's status tail may be a raw id (brn/slp/…) — translate it the
+            // same way as the -damage tail. Faints read "Fainted".
+            const clearLabel = parts[1] ? (parts[1] === "fnt" ? "Fainted" : statusLabel(parts[1])) : "";
+            return { kind: "info", text: who ? `${who}'s ${clearLabel || "status"} was removed` : "The status was removed" };
         }
-        case "-heal":
-            return { kind: "info", text: who ? `${who} recovered (${parts[1] || ""})` : "A Pokémon recovered" };
+        case "-damage": {
+            // Live-sim payload is the full condition grammar — "82/100 brn"
+            // (hp/maxhp + a status tail). D4 check 1: the status tail must
+            // not render raw. Keep the established " (62/100)" hp read;
+            // translate the tail through statusLabel. No tail -> unchanged.
+            const cond = String(parts[1] || "");
+            const mhp = /^(\S+)(?:\s+([a-z]+))?$/.exec(cond);
+            const hp = mhp ? mhp[1] : cond;
+            const label = mhp?.[2] ? (mhp[2] === "fnt" ? "Fainted" : statusLabel(mhp[2])) : "";
+            const tail = cond ? ` (${hp}${label ? ` ${label}` : ""})` : "";
+            return { kind: "info", text: who ? `${who} took damage${tail}` : "A Pokémon took damage" };
+        }
+        case "-heal": {
+            // Same condition-grammar payload as -damage; keep the hp read,
+            // translate any status tail.
+            const cond = String(parts[1] || "");
+            const mhp = /^(\S+)(?:\s+([a-z]+))?$/.exec(cond);
+            const hp = mhp ? mhp[1] : cond;
+            const label = mhp?.[2] ? (mhp[2] === "fnt" ? "Fainted" : statusLabel(mhp[2])) : "";
+            const tail = cond ? ` (${hp}${label ? ` ${label}` : ""})` : "";
+            return { kind: "info", text: who ? `${who} recovered${tail}` : "A Pokémon recovered" };
+        }
         case "immune":
         case "-immune":
             return { kind: "info", text: parts[1] ? `${who} is immune to ${parts[1]}` : "It had no effect" };
         case "-boost":
-            return { kind: "info", text: who ? `${who}'s ${parts[1]} rose!` : "A stat rose!" };
+            return { kind: "info", text: who ? `${who}'s ${statWord(parts[1])} rose!` : "A stat rose!" };
         case "-unboost":
-            return { kind: "info", text: who ? `${who}'s ${parts[1]} fell!` : "A stat fell!" };
+            return { kind: "info", text: who ? `${who}'s ${statWord(parts[1])} fell!` : "A stat fell!" };
         case "-ability":
             return { kind: "info", text: who ? `${who}'s ${parts[1]} activated` : "An ability activated" };
         case "-weather":
         case "weather":
             return { kind: "info", text: `The weather became ${parts[0]}` };
         default:
-            // Anything rare (items, sidestart, …): a readable fallback.
+            // Unrecognized token: the display gate (isDisplayLogLine) hides it,
+            // so this fallback is unreachable from the log UI — kept readable
+            // for direct parseLogLine callers.
             return { kind: "info", text: [who, ev.startsWith("-") ? ev.slice(1) : ev, parts.slice(1).join(" ")].filter(Boolean).join(" ") };
     }
 }
 
 /**
- * Whether a raw log line should be shown at all. Protocol-internal lines
- * (|split, |t:, |upkeep, |gametype, |player, |teamsize, |win, empty …)
- * are dropped — the win banner (§3.2 end state) is the result's display
- * surface, not the log.
+ * Whether a raw log line should be shown at all: only the C1 §3.2 human
+ * events (DISPLAY_EVENTS) render. Every other protocol line (|request|,
+ * |t:, |upkeep|, |gametype|, stat blocks, …) is dropped — the win banner
+ * (§3.2 end state) is the result's display surface, not the log.
  * @param {string} raw
  * @returns {boolean}
  */
@@ -200,7 +264,89 @@ export function isDisplayLogLine(raw) {
     const line = String(raw || "");
     if (!line || RE_EMPTY.test(line)) return false;
     const m = line.match(/^\|([a-z-]+)\|/);
-    if (m && HIDDEN_EVENTS.has(m[1])) return false;
-    if (/^\|t:\|/.test(line)) return false;
-    return RE_TURN.test(line) || /^\|[a-z-]+\|/.test(line);
+    if (!m) return false; // non-protocol line (or |t: timestamp): hidden
+    return DISPLAY_EVENTS.has(m[1]);
+}
+
+/**
+ * D1 (fix 1): collapse consecutive identical DISPLAY rows. Two different
+ * raw events can render the same sentence back-to-back — the classic case
+ * is a `|switch|` announcement immediately followed by its `|-switch|`
+ * stat-block twin (both read "X went on the field!"), or `|weather|` +
+ * `|-weather|` ("The weather became X"). A reader scanning the log reads
+ * that as a duplicate row. Repeats that are NOT consecutive are kept.
+ *
+ * @param {{kind:string, text:string}[]} rows parsed display rows.
+ * @returns {Array<{kind:string, text:string}>} the rows with consecutive
+ *   identical (kind + text) repeats collapsed to one.
+ */
+export function dedupeConsecutiveRows(rows) {
+    const out = [];
+    for (const row of rows || []) {
+        const prev = out[out.length - 1];
+        if (prev && prev.kind === row.kind && prev.text === row.text) continue;
+        out.push(row);
+    }
+    return out;
+}
+
+/**
+ * Idempotent log accumulation for the /battle page (D1 fix 1).
+ *
+ * The service ships only NEW lines per envelope (room.js slices at
+ * lastEnvLogLen), so a normal advance never overlaps. The resync path
+ * (notYourTurn -> GET /battle/:id, whose state() is the room's lastEnvelope)
+ * re-ships the LAST slice, which can already be in the accumulated log —
+ * blindly appending would double the rows. reconcileLog finds the longest
+ * suffix of `prev` that matches the head of `slice` and appends only the
+ * new tail, then collapses exact consecutive duplicates as a resync safety
+ * net. startNewBattle's setLog(res.envelope.log) stays the only reset.
+ *
+ * @param {string[]} prev the accumulated raw log lines.
+ * @param {string[]} slice the envelope's log slice (may overlap the tail).
+ * @returns {string[]} the reconciled accumulated log.
+ */
+export function reconcileLog(prev, slice) {
+    const p = Array.isArray(prev) ? prev : [];
+    const s = Array.isArray(slice) ? slice : [];
+    if (!s.length) return p;
+    let overlap = 0;
+    const cap = Math.min(p.length, s.length);
+    for (let n = cap; n >= 1; n -= 1) {
+        let matches = true;
+        for (let i = 0; i < n; i += 1) {
+            if (p[p.length - n + i] !== s[i]) { matches = false; break; }
+        }
+        if (matches) { overlap = n; break; }
+    }
+    const merged = [...p, ...s.slice(overlap)];
+    const out = [];
+    for (const line of merged) {
+        if (out.length && out[out.length - 1] === line) continue;
+        out.push(line);
+    }
+    return out;
+}
+
+/**
+ * D4 fix 2 (fair-play / clutter): hide held items on the arena plates.
+ *
+ * The sim's `details` field is the wire contract — "Level 84 Forretress @
+ * Focus Sash" — and is NOT stripped at the source (envelope.js owns that
+ * shape). Held items are opponent intel: the player's plate and the foe's
+ * plate both render them, which leaks information in both directions. The
+ * display layer strips the "@ Item" clause and shows "Level 84 Forretress".
+ *
+ * The " @ " clause is Showdown's details format (level + species + item);
+ * species and item names never contain the " @ " separator, so splitting on
+ * it is safe. No item (or no match) returns the input unchanged.
+ *
+ * @param {string} details the C2 §2.4 `details` value.
+ * @returns {string} the details with any "@ <Item>" clause removed.
+ */
+export function stripHeldItem(details) {
+    const s = String(details || "");
+    const i = s.indexOf(" @ ");
+    if (i === -1) return s;
+    return s.slice(0, i);
 }

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { getSpriteUrl, toProperCase } from "../../utils/api";
 import { TYPE_IDS, MAX_EV, EV_TOTAL_CAP } from "../../utils/pokemonSets";
+import { natureLabel, natureEffectLabel } from "../../utils/natures";
 import TypeBadge from "../TypeBadge";
 
 /**
@@ -111,6 +112,47 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
     const items = record?.items || [];
     const natures = record?.natures || [];
 
+    // D1 (fix 4): the form-gate surface. Item-locked formes (Mega/Primal/
+    // Z-Crystal …) battle ONLY while their required item is held. Two
+    // directions:
+    //   - a BASE slot (record.gatedForms): the list of forms the user can
+    //     unlock by equipping an item — Mega stones are Past-standard, so
+    //     gate items missing from the pool are appended to the item select.
+    //   - a FORM slot (record.formGate): the set itself is the transformed
+    //     form; without its item it silently falls back to the base.
+    const gatedForms = record?.gatedForms || [];
+    const thisFormGate = record?.formGate || null;
+    const gateItems = [
+        ...new Set([
+            ...gatedForms.map((f) => f.item),
+            thisFormGate?.item,
+        ].filter(Boolean)),
+    ];
+    const extraGateItems = gateItems.filter((id) => !items.includes(id));
+    const itemOptions = [...items, ...extraGateItems];
+
+    // P2 (fixes 1/2/5): display enrichment for the sim-affecting selects.
+    // itemNames/itemEffects + abilityDescriptions come from the C2 §4 record
+    // (lane-enriched, additive — absent maps degrade to "no hint"). The gate
+    // items appended above may lack pool names/effects, so fall back to a
+    // capitalized id / no effect rather than a blank or wrong string.
+    const itemNames = record?.itemNames || {};
+    const itemEffects = record?.itemEffects || {};
+    const abilityDescriptions = record?.abilityDescriptions || {};
+    const selAbility = set.ability || "";
+    const selAbilityDesc = abilityDescriptions[selAbility] || "";
+    const selItem = set.item || "";
+    const selItemName = selItem ? itemNames[selItem] || toProperCase(selItem) : "";
+    const selItemEffect = selItem ? itemEffects[selItem] || "" : "";
+    const natureEffect = natureEffectLabel(set.nature || "hardy");
+    // Which gate item (if any) this set is currently holding?
+    const activeGate =
+        gatedForms.find((f) => f.item && set.item === f.item) ||
+        (thisFormGate?.item && set.item === thisFormGate.item
+            ? { item: thisFormGate.item, itemName: thisFormGate.itemName, formName: thisFormGate.formName }
+            : null) ||
+        null;
+
     // Focus the first field on mount (C1 §2.4 a11y).
     const firstFieldRef = useRef(null);
     useEffect(() => {
@@ -206,6 +248,17 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                     </option>
                                 ))}
                             </select>
+                            {/* P2 (fix 2/5): the selected ability's one-line effect.
+                                Additive — an unknown/dump-absent ability has no
+                                desc, so the line is simply absent (never wrong). */}
+                            {selAbilityDesc && (
+                                <p
+                                    title={selAbilityDesc}
+                                    className="mt-1 truncate text-[10px] font-normal normal-case text-neutral-400"
+                                >
+                                    {selAbilityDesc}
+                                </p>
+                            )}
                         </label>
 
                         <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
@@ -216,12 +269,29 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                 onChange={(e) => onUpdate({ item: e.target.value })}
                                 className="mt-1 min-h-11 w-full appearance-none rounded-lg border border-neutral-200 bg-white px-3 py-2.5 pr-8 text-sm text-neutral-900 focus:outline-none focus:ring-2 focus:ring-red-600"
                             >
-                                {items.map((id) => (
-                                    <option key={id || "none"} value={id}>
-                                        {id || "No item"}
-                                    </option>
-                                ))}
+                                {itemOptions.map((id, i) => {
+                                    const isGate = extraGateItems.includes(id);
+                                    const label = id
+                                        ? itemNames[id] || toProperCase(id)
+                                        : "No item";
+                                    return (
+                                        <option key={id || `none-${i}`} value={id}>
+                                            {isGate ? `★ ${label} (form item)` : label}
+                                        </option>
+                                    );
+                                })}
                             </select>
+                            {/* P2 (fix 1/5): the selected item's effect. Full text
+                                lives in the native `title` tooltip; the visible
+                                line is a one-line truncation. */}
+                            {selItemEffect && (
+                                <p
+                                    title={selItemEffect}
+                                    className="mt-1 truncate text-[10px] font-normal normal-case text-neutral-400"
+                                >
+                                    {selItemName} — {selItemEffect}
+                                </p>
+                            )}
                         </label>
 
                         <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
@@ -248,10 +318,18 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                             >
                                 {(natures.length ? natures : ["hardy"]).map((n) => (
                                     <option key={n} value={n}>
-                                        {toProperCase(n)}
+                                        {natureLabel(n)}
                                     </option>
                                 ))}
                             </select>
+                            {/* P2 (fix 3/5): what the selected nature changes.
+                                The 25 canonical natures all map in NATURES; an
+                                out-of-table id yields "" and the line is hidden. */}
+                            {natureEffect && (
+                                <p className="mt-1 text-[10px] font-normal normal-case text-neutral-400">
+                                    {natureEffect}
+                                </p>
+                            )}
                         </label>
 
                         <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
@@ -267,6 +345,11 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                     <option key={t} value={t}>{toProperCase(t)}</option>
                                 ))}
                             </select>
+                            {/* P2 (fix 5): C2 §1 optional type metadata — the
+                                Hidden Power move's type, determined by IVs. */}
+                            <p className="mt-1 text-[10px] font-normal normal-case text-neutral-400">
+                                Optional metadata — sets the Hidden Power move's type (from IVs); omitted when the sim defaults it.
+                            </p>
                         </label>
 
                         <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
@@ -282,8 +365,101 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                     <option key={t} value={t}>{toProperCase(t)}</option>
                                 ))}
                             </select>
+                            {/* P2 (fix 5): C2 §1 optional type metadata — the
+                                Gen-9 Tera form type override. */}
+                            <p className="mt-1 text-[10px] font-normal normal-case text-neutral-400">
+                                Tera form type override for gen9 formats; ignored by the sim in non-Tera formats.
+                            </p>
                         </label>
                     </div>
+
+                    {/* D1 (fix 4): the form gate. Item-locked formes
+                        (Mega/Primal/Z-Crystal …) battle ONLY while their
+                        required item is held. The base form is the default;
+                        equipping a gate item unlocks the transformed form,
+                        and a stored form falls back to the base without it. */}
+                    {(gatedForms.length || thisFormGate) && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                            <h3 className="text-xs font-semibold uppercase tracking-wider text-amber-800">
+                                Form transformation
+                            </h3>
+                            {/* base slot: the unlockable sibling forms */}
+                            {gatedForms.length > 0 && (
+                                <ul className="mt-2 space-y-1.5 text-xs text-amber-800">
+                                    {gatedForms.map((f) => {
+                                        const equipped = f.item && set.item === f.item;
+                                        return (
+                                            <li key={f.form} className="flex items-center justify-between gap-2">
+                                                <span>
+                                                    {f.formName}
+                                                    {f.item
+                                                        ? <> — requires <strong>{f.itemName}</strong></>
+                                                        : " — no v1 item (unavailable)"}
+                                                </span>
+                                                {equipped ? (
+                                                    <button
+                                                        type="button"
+                                                        aria-label={`Unequip ${f.itemName}`}
+                                                        onClick={() => onUpdate({ item: "" })}
+                                                        className="shrink-0 rounded border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-amber-700 hover:bg-amber-100"
+                                                    >
+                                                        Unequip
+                                                    </button>
+                                                ) : f.item ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => onUpdate({ item: f.item })}
+                                                        className="shrink-0 rounded bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-amber-700"
+                                                    >
+                                                        Equip
+                                                    </button>
+                                                ) : null}
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
+                            {/* form slot: THIS set is the gated form itself */}
+                            {thisFormGate && thisFormGate.item && (
+                                <ul className="mt-2 space-y-1.5 text-xs text-amber-800">
+                                    <li className="flex items-center justify-between gap-2">
+                                        <span>
+                                            This set is <strong>{thisFormGate.formName}</strong> —
+                                            requires <strong>{thisFormGate.itemName}</strong>
+                                        </span>
+                                        {set.item === thisFormGate.item ? (
+                                            <button
+                                                type="button"
+                                                aria-label={`Unequip ${thisFormGate.itemName}`}
+                                                onClick={() => onUpdate({ item: "" })}
+                                                className="shrink-0 rounded border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-amber-700 hover:bg-amber-100"
+                                            >
+                                                Unequip
+                                            </button>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                onClick={() => onUpdate({ item: thisFormGate.item })}
+                                                className="shrink-0 rounded bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-amber-700"
+                                            >
+                                                Equip
+                                            </button>
+                                        )}
+                                    </li>
+                                </ul>
+                            )}
+                            {activeGate && (
+                                <p className="mt-2 text-xs font-medium text-amber-700">
+                                    {activeGate.itemName} equipped — this set now battles as {activeGate.formName}.
+                                </p>
+                            )}
+                            {thisFormGate && !thisFormGate.item && (
+                                <p className="mt-2 text-xs text-amber-700">
+                                    This forme is not item-locked in v1; it battles as-is.
+                                </p>
+                            )}
+                        </div>
+                    )}
 
                     {/* IVs */}
                     <div>
@@ -341,6 +517,14 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                 Total: {evTotal}/{EV_TOTAL_CAP}
                             </p>
                         </div>
+                        {/* P2 (fix 4): the in-game total cap is 510, not 252.
+                            253–510 is legal (no red); only >510 flags the
+                            advisory hint. Per-stat clamps remain 0–252. */}
+                        {evTotal > EV_TOTAL_CAP && (
+                            <p className="mb-2 text-[10px] font-normal text-red-600">
+                                Over the {EV_TOTAL_CAP} in-game EV cap — trim {evTotal - EV_TOTAL_CAP} EV to reach it.
+                            </p>
+                        )}
                         <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
                             {statKeys.map((k) => (
                                 <label key={k} className="block text-[10px] font-semibold uppercase text-neutral-400">
