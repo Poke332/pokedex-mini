@@ -7,6 +7,10 @@ import { getRecordsForSpecies } from "../utils/showdownData";
 import { loadDexMap } from "../utils/battleSprites";
 import { isDisplayLogLine, parseLogLine, reconcileLog } from "../utils/battleLog";
 import { fxEvents, fxClass, fxDuration } from "../utils/battleFx";
+import {
+    isDoublesFormat, moveNeedsTarget, doublesTargetOptions,
+    targetLocSuffix, doublesSecondLead,
+} from "../utils/battleDoubles";
 import { getTypeDamageRelations } from "../utils/api";
 import TeamPreviewGrid from "../components/battle/TeamPreviewGrid";
 import PokemonPlate from "../components/battle/PokemonPlate";
@@ -15,6 +19,9 @@ import SwitchButton from "../components/battle/SwitchButton";
 import BenchChip from "../components/battle/BenchChip";
 import BattleLog from "../components/battle/BattleLog";
 import EndStateCard from "../components/battle/EndStateCard";
+import TargetPicker from "../components/battle/TargetPicker";
+import SoundToggle from "../components/battle/SoundToggle";
+import { battleAudio } from "../utils/battleAudio";
 
 const SESSION_KEY = "pokedex.simulation.battle";
 
@@ -38,6 +45,10 @@ export default function BattlePage() {
     const party = useState(loadParty)[0];
     const team = useMemo(() => party.team || [], [party]);
     const format = party.format || "gen9ou";
+    // P4: the doubles gate. All doubles-only UI surfaces (2-plate arena, the
+    // target picker, the 4-bench row) key off `isDoubles`; the singles path is
+    // byte-identical to before.
+    const isDoubles = isDoublesFormat(format);
 
     const [phase, setPhase] = useState("idle"); // idle|connecting|preview|battle|over|error|empty
     const [battleId, setBattleId] = useState(null);
@@ -49,6 +60,11 @@ export default function BattlePage() {
     const [busy, setBusy] = useState(false);
     const [errorInfo, setErrorInfo] = useState(null);
     const [toast, setToast] = useState(null);
+    // P4 (doubles move targeting): the move currently awaiting a target pick.
+    // `move` (the MoveEntry id) + `loc` (the signed target-loc the user chose,
+    // null until they pick a plate). Target-less moves + every singles move
+    // commit immediately and never set this.
+    const [pendingMove, setPendingMove] = useState(null);
     // C1 §3.4: re-entering /battle mid-session while an abandoned battle was
     // running surfaces a small "abandon" indicator (battles are ephemeral).
     // The flag is an initial value read from sessionStorage — not effect state.
@@ -112,6 +128,14 @@ export default function BattlePage() {
     const yourPlateRef = useRef(null);
     const foeChipRef = useRef(null);
     const yourChipRef = useRef(null);
+    // P4 (doubles): the full per-slot plate refs. In doubles the arena has
+    // two plates per side; D3's side-level FX (attack/hit/status/switchIn)
+    // still lands on the PRIMARY plate (slot 0) via the refs above, so a move
+    // targeting slot 1 still animates the slot-0 plate — a deliberate
+    // simplification (the task's 5 items do not include per-slot FX).
+    // turnPulse flashes EVERY plate, so it needs all of them.
+    const foePlateRefs = useRef([null, null]);
+    const yourPlateRefs = useRef([null, null]);
     const pillRef = useRef(null);
     const prevEnvRef = useRef(null);   // previous envelope (FX diff base)
     const logRef = useRef([]);         // mirrors `log` — the PRE-log at apply time
@@ -120,13 +144,45 @@ export default function BattlePage() {
     // Clean up any still-pending FX removals on unmount (a battle can end
     // while a window is open; timers must not fire on dead refs).
     useEffect(() => () => { pendingFxRef.current.forEach(clearTimeout); }, []);
+    // Q2: leaving the page (abandon/close) stops the BGM — no lingering loop.
+    useEffect(() => () => { battleAudio.stopBattleMusic(); }, []);
+    // Dev-only QA bridge (the __d3sched pattern): expose the controller's live
+    // state so a headless driver can assert "the BGM loop actually stopped at
+    // battleOver" instead of re-deriving it.
+    useEffect(() => {
+        if (typeof window !== "undefined") window.__q2battleAudio = battleAudio;
+    }, []);
 
     // D3: fire one scene FX event. `kind`+`side` select the target; `offset`
     // defers the class add (spec §2.1 choreography: pulse(0) -> your
     // attack(0-200) -> foe hit@150 + HP drain -> foe attack@200 -> your hit;
     // faints last). turnPulse adds the pill scale + both plates' border flash
     // on the same beat.
+    // Q2: the audio layer runs alongside the D3 CSS (the card's "audio must
+    // not gate animation" bar): attack/hit/faint -> synthesized SFX, fired
+    // from the D3 event queue at the same offsets the CSS classes land.
+    // The switch-in cry is wired at the envelope level instead (the card's
+    // "any active-mon change", including the first lead appearance which the
+    // D3 switch-in deliberately suppresses on prev=null). Every call is a
+    // documented no-op on failure, so the battle flow never breaks on a
+    // missing asset.
+    const dexMapRef = useRef(dexMap);
+    useEffect(() => { dexMapRef.current = dexMap; }, [dexMap]);
+    // Dev-only QA bridge (the __d3sched pattern): record which sounds the
+    // battle flow actually requested, for live verification.
+    const logAudio = useCallback((what) => {
+        if (typeof window !== "undefined" && window.__q2audio) window.__q2audio.push(what);
+    }, []);
     const playEvent = useCallback((ev) => {
+        // The D3 choreography staggers events on the same beat; schedule the
+        // audio at the same offsets so sound and CSS land together.
+        const scheduleAt = (fn, ms) => {
+            if (ms) setTimeout(fn, ms);
+            else fn();
+        };
+        if (ev.kind === "attack") { scheduleAt(() => { logAudio("sfx:attack"); battleAudio.playHit("attack"); }, ev.offset); return; }
+        if (ev.kind === "hit") { scheduleAt(() => { logAudio("sfx:hit"); battleAudio.playHit("impact"); }, ev.offset); return; }
+        if (ev.kind === "faint") { scheduleAt(() => { logAudio("sfx:faint"); battleAudio.playFaint(); }, ev.offset); return; }
         const cls = fxClass(ev.kind);
         const fire = () => {
             const target = ev.kind === "status"
@@ -146,8 +202,13 @@ export default function BattlePage() {
                         setTimeout(() => pillRef.current.classList.remove("bs-turn-pulse"), fxDuration("turnPulse")),
                     );
                 }
-                for (const plate of [foePlateRef.current, yourPlateRef.current]) {
-                    if (!plate) continue;
+                // P4: flash EVERY plate — both slots in doubles, the single
+                // primary plate in singles (the slot-1 refs stay null there).
+                const plates = [
+                    ...foePlateRefs.current,
+                    ...yourPlateRefs.current,
+                ].filter(Boolean);
+                for (const plate of plates) {
                     plate.classList.add("bs-turn-pulse-plate");
                     pendingFxRef.current.push(
                         setTimeout(() => plate.classList.remove("bs-turn-pulse-plate"), fxDuration("turnPulse")),
@@ -164,7 +225,7 @@ export default function BattlePage() {
             if (ev.offset) setTimeout(run, ev.offset);
             else run();
         });
-    }, []);
+    }, [logAudio]);
 
     // D3: diff this envelope against the previous one and schedule the FX.
     // `newLines` are ONLY the log lines this envelope added (reconcileLog's
@@ -189,6 +250,53 @@ export default function BattlePage() {
         }
         for (const ev of events) playEvent(ev);
     }, [playEvent]);
+
+    // Q2: switch-in cries are diffed at the ENVELOPE level (not via the D3
+    // switch-in event, which suppresses the very first lead appearance on
+    // prev=null). A ref holds the last-seen active/foe species per side; a
+    // real species change on either side plays the INCOMING mon's cry (the
+    // card's "any active-mon change" trigger), including the lead summon and
+    // every switch. dexMapRef resolves species -> national dex number; a
+    // null dexNum (lane not loaded / species without one) skips the cry.
+    const prevCrySpeciesRef = useRef({ yours: null, foe: null });
+    // A switch-in whose dexNum was unavailable when it landed (the data lane
+    // had not arrived yet) is held here and replayed the moment the dexMap
+    // lands — a summon must not lose its cry to a load-order race.
+    const pendingCriesRef = useRef([]);
+    const cryWithDex = useCallback((side, species) => {
+        const dex = dexMapRef.current[species] ?? null;
+        logAudio(`cry:${side}:${species}${dex ? `#${dex}` : ""}`);
+        battleAudio.playSwitchInCry(dex);
+    }, [logAudio]);
+    const playSwitchInCries = useCallback((env) => {
+        const yours = env.active?.[0]?.species || null;
+        const foe = env.foe?.species || null;
+        const changed = (prev, next) => !!next && prev !== next;
+        const enqueueCry = (side, species) => {
+            // Dex not resolvable yet: queue it; the dexMap effect replays.
+            if (!(dexMapRef.current[species] ?? null)) {
+                pendingCriesRef.current.push({ side, species });
+                return;
+            }
+            cryWithDex(side, species);
+        };
+        if (changed(prevCrySpeciesRef.current.yours, yours)) enqueueCry("yours", yours);
+        if (changed(prevCrySpeciesRef.current.foe, foe)) enqueueCry("foe", foe);
+        prevCrySpeciesRef.current = { yours, foe };
+    }, [cryWithDex]);
+    // On dexMap arrival, replay any switch-ins that were queued without a
+    // dexNum. Species that still resolve to null have no cry in the PokeAPI
+    // set — they are dropped (the card's "species without a dexNum skip the
+    // cry" ruling).
+    useEffect(() => {
+        if (!pendingCriesRef.current.length) return;
+        const due = pendingCriesRef.current.splice(0, pendingCriesRef.current.length);
+        for (const { side, species } of due) {
+            const dex = dexMap[species] ?? null;
+            if (dex) cryWithDex(side, species);
+            else logAudio(`cry-skip:${side}:${species}`);
+        }
+    }, [dexMap, cryWithDex, logAudio]);
     // D1 (fix 4): the mount-time create call runs before the data lane lands,
     // but the retry path (and every later create) must resolve form-gated
     // species with the CURRENT records. A ref synced in an effect reads the
@@ -251,6 +359,9 @@ export default function BattlePage() {
             // before the lane lands; retries read the loaded map).
             const res = await startBattle({ format, p1Team: buildTeam(team, recordsForFormatRef.current) });
             if (!res.ok) {
+                // Q2: a failed start (or a lost room) ends the loop — no
+                // lingering BGM on the error banner.
+                battleAudio.stopBattleMusic();
                 setErrorInfo(res);
                 setPhase("error");
                 return;
@@ -265,6 +376,8 @@ export default function BattlePage() {
             // tail can never bleed into the new battle's diff.
             logRef.current = freshLog;
             prevEnvRef.current = null;
+            prevCrySpeciesRef.current = { yours: null, foe: null };
+            pendingCriesRef.current = [];
             pendingFxRef.current.forEach(clearTimeout);
             pendingFxRef.current = [];
             // The first envelope's state is "teampreview" (C2 §3.1) — the
@@ -310,21 +423,33 @@ export default function BattlePage() {
         setLog(nextLog);
         const newLines = nextLog.slice(preLog.length);
         scheduleFx(env, newLines);
+        playSwitchInCries(env);
         prevEnvRef.current = env;
         const cr = env.choiceRequest || {};
         // A new foe can appear (switch on the opposing side) — widen the lane.
-        if (env.foe?.species) {
-            setSpeciesIds((prev) => (prev.includes(env.foe.species) ? prev : [...prev, env.foe.species]));
+        // P4 (doubles): there are TWO foes (env.foes[]), so widen on every
+        // visible foe species; singles is the single env.foe. Widen only on
+        // genuinely-new species (idempotent — a resync re-ships the same foes).
+        const foeSpecies = (Array.isArray(env.foes) && env.foes.length ? env.foes : (env.foe ? [env.foe] : []))
+            .map((f) => f?.species)
+            .filter(Boolean);
+        if (foeSpecies.length) {
+            setSpeciesIds((prev) => {
+                const missing = foeSpecies.filter((s) => !prev.includes(s));
+                return missing.length ? [...prev, ...missing] : prev;
+            });
         }
         if (env.battleOver) {
             setPhase("over");
+            // Q2: no lingering loop — the BGM ends with the battle.
+            battleAudio.stopBattleMusic();
             try { sessionStorage.removeItem(SESSION_KEY); } catch { /* noop */ }
         } else if (cr.state === "teampreview") {
             setPhase("preview");
         } else {
             setPhase("battle");
         }
-    }, [scheduleFx]);
+    }, [scheduleFx, playSwitchInCries]);
 
     const submitChoice = useCallback(async (choice) => {
         if (busy || !battleId) return;
@@ -347,12 +472,17 @@ export default function BattlePage() {
                 if (sync.ok) {
                     applyEnvelope(sync.envelope);
                 } else {
+                    // Q2: the room is gone — the loop ends with it.
+                    battleAudio.stopBattleMusic();
                     setErrorInfo(sync);
                     setPhase("error");
                 }
             } else {
                 // unreachable / battleGone / service: the room is lost
                 // (C1 §3.2 service-error banner, OD-8 retry = re-preview).
+                // Q2: stop the loop on a lost room; a retry (re-preview +
+                // lead pick) restarts it from commitLead.
+                battleAudio.stopBattleMusic();
                 setErrorInfo(res);
                 setPhase("error");
             }
@@ -361,18 +491,71 @@ export default function BattlePage() {
         }
     }, [battleId, busy, applyEnvelope, showToast]);
 
+    // Q2: the post-gesture BGM start. `unlock()` resumes the AudioContext
+    // (the user gesture that un-locks autoplay); `startBattleMusic()` opens
+    // the loop. Returns true only when the loop actually started, so the
+    // QA bridge can record whether BGM was audible for the session.
+    const startMusic = useCallback(async () => {
+        await battleAudio.unlock();
+        return battleAudio.startBattleMusic();
+    }, []);
+
     const commitLead = useCallback((index) => {
         setLeadIndex(index);
+        // Q2: picking a lead IS the user gesture that unlocks audio. The
+        // BGM loop starts here (post-gesture, per the card's autoplay
+        // ruling); SFX are lazy-gated on the unlocked AudioContext.
+        startMusic().then((started) => logAudio(started ? "music:started" : "music:not-started"));
         submitChoice(`teampreview ${index}`);
-    }, [submitChoice]);
+    }, [submitChoice, startMusic, logAudio]);
 
     const commitMove = useCallback((moveId) => {
+        battleAudio.unlock();
+        // P4: in doubles a target-needing move enters targeting mode instead of
+        // committing; the user then picks a highlighted plate (or ESC cancels).
+        // Target-less moves + every singles move commit the bare `move <id>`
+        // exactly as before (no regression). Read from `envelope` (state, in
+        // scope here) rather than the view-derived `cr` (declared below).
+        if (isDoubles) {
+            const entry = (envelope?.choiceRequest?.legalMoves || [])
+                .find((m) => m.id === moveId) || null;
+            if (entry && moveNeedsTarget(entry)) {
+                setPendingMove({ moveId, loc: null });
+                return;
+            }
+        }
         submitChoice(`move ${moveId}`);
-    }, [submitChoice]);
+    }, [submitChoice, isDoubles, envelope]);
+
+    // P4: commit the pending move on a chosen target slot. A highlighted plate
+    // fires onTarget -> its option.loc (a signed target-loc, e.g. +1 / -2).
+    // No valid target (all fainted) -> loc is null -> the bare `move <id>`
+    // token, which the service auto-resolves (P1's default-loc parity).
+    const commitTargetedMove = useCallback((loc) => {
+        if (!pendingMove) return;
+        const suffix = targetLocSuffix(loc ?? null);
+        submitChoice(suffix ? `move ${pendingMove.moveId} ${suffix}` : `move ${pendingMove.moveId}`);
+        setPendingMove(null);
+    }, [pendingMove, submitChoice]);
+
+    const cancelTargeting = useCallback(() => {
+        setPendingMove(null);
+    }, []);
 
     const commitSwitch = useCallback((position) => {
+        battleAudio.unlock();
         submitChoice(`switch ${position}`);
     }, [submitChoice]);
+
+    // P4: ESC cancels a pending target pick (the move stays uncommitted).
+    useEffect(() => {
+        if (!pendingMove) return undefined;
+        const onKey = (e) => {
+            if (e.key === "Escape") setPendingMove(null);
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [pendingMove]);
 
     // ------------------------------------------------------------------ view
     const cr = envelope?.choiceRequest;
@@ -388,6 +571,70 @@ export default function BattlePage() {
         // `records` is the nested C2 §4 shape {speciesId:{formatId:record}}.
         return { ...mon, types: records?.[mon.species]?.[format]?.types || [] };
     }, [records, format]);
+
+    // P4 (doubles): the two-plate arena. `actives` is the caller's full active
+    // array (C2 §2.1 `active[]` — already an array; both slots in doubles, one
+    // in singles). `foesArr` is the opponent's actives from P1's additive
+    // `foes[]`, falling back to the singular `foe` for singles + in-flight
+    // rooms that predate the service update. Both run through withMeta.
+    const actives = useMemo(
+        () => (envelope?.active || []).map(withMeta),
+        [envelope, withMeta],
+    );
+    const foesArr = useMemo(() => {
+        const raw = Array.isArray(envelope?.foes) && envelope.foes.length
+            ? envelope.foes
+            : (envelope?.foe ? [envelope.foe] : []);
+        return raw.map(withMeta);
+    }, [envelope, withMeta]);
+    // The doubles target picker: for the pending move, which of the visible
+    // plates are highlighted + the option.loc each carries. Null unless a move
+    // is actually awaiting a pick. `pendingMove` is {moveId, loc} (no .target),
+    // so the target-needing check must run on the resolved MoveEntry.
+    const targetOptions = useMemo(() => {
+        if (!pendingMove) return null;
+        const entry = (cr?.legalMoves || []).find((m) => m.id === pendingMove.moveId) || null;
+        if (!entry || !moveNeedsTarget(entry)) return null;
+        return { move: entry, ...doublesTargetOptions(entry, actives, foesArr) };
+    }, [pendingMove, cr, actives, foesArr]);
+    // P4 (doubles): the 2nd active the sim auto-fills when the
+    // caller picks a lead (verified live: lead index 0 -> team index 1; any
+    // other lead -> team index 0). Shown in the preview step only.
+    const secondLead = useMemo(
+        () => (isDoubles && leadIndex != null ? doublesSecondLead(team, leadIndex) : null),
+        [isDoubles, leadIndex, team],
+    );
+    // P4 (doubles): which VISIBLE plate is a target of the pending move.
+    // `rowKey` is the plate-row key ("yours" = the caller's actives,
+    // "foe" = the opponent's foesArr). The pending move's target side only
+    // maps to ONE row: an ally move targets the caller's actives ("yours"), a
+    // foe move targets the opponent's foesArr ("foe"). Within that row the
+    // option index == the plate index (doublesTargetOptions builds options in
+    // the same order). Returns the signed target-loc to commit, or null.
+    const targetSlotFor = useCallback((rowKey, idx) => {
+        if (!targetOptions) return null;
+        const want = rowKey === "foe" ? "foe" : "ally";
+        if (targetOptions.side !== want) return null;
+        const opt = (targetOptions.options || [])[idx];
+        if (!opt || opt.disabled) return null;
+        return opt.loc;
+    }, [targetOptions]);
+    // P4 (doubles): ref-callback factory for the two-plate arena. Slot 0 also
+    // feeds the D3 primary refs (so the side-level FX still land on slot 0);
+    // slot 1 feeds only the per-slot arrays (used by turnPulse).
+    const setSlotRefs = useCallback((side, idx) => (node) => {
+        const plateArr = side === "foe" ? foePlateRefs : yourPlateRefs;
+        plateArr.current[idx] = node;
+        if (idx === 0) {
+            if (side === "foe") {
+                foePlateRef.current = node;
+                foeChipRef.current = node;
+            } else {
+                yourPlateRef.current = node;
+                yourChipRef.current = node;
+            }
+        }
+    }, []);
 
     // C1 §3.3: the mobile turn strip also carries the most recent log line.
     const lastLogLine = (() => {
@@ -415,7 +662,7 @@ export default function BattlePage() {
     const movesDisabledByState = state === "switch" || state === "over" || state === "wait";
 
     const headerTitle =
-        phase === "preview" ? "Battle — choose your lead" :
+        phase === "preview" ? (isDoubles ? "Battle — choose your leads" : "Battle — choose your lead") :
         phase === "over" ? "Battle" :
         "Battle";
 
@@ -437,7 +684,21 @@ export default function BattlePage() {
 
     const controlCard = (
         <div className="w-full rounded-lg border border-neutral-200 bg-white p-4">
-            {/* Moves: 2×2 grid (C1 §3.2) */}
+            {/* P4 (doubles): the target picker — shown above the moves grid
+                when a target-needing move is awaiting a pick. The highlighted
+                plates on the field are the actual pick surface (click /
+                keyboard); this row is the instruction + cancel affordance. */}
+            {targetOptions && targetOptions.options.length > 0 && (
+                <TargetPicker
+                    move={targetOptions.move}
+                    targetCount={targetOptions.options.filter((o) => !o.disabled).length}
+                    onCancel={cancelTargeting}
+                    busy={busy}
+                />
+            )}
+            {/* Moves: 2×2 grid (C1 §3.2). P4: in doubles a target-needing move
+                re-enters targeting mode on tap (commitMove -> pendingMove);
+                the same button reads "Choose a target" via the banner. */}
             <div className="grid grid-cols-2 gap-2">
                 {(cr?.legalMoves || []).map((move) => {
                     // D1 (fix 3): enrich the C2 §2.2 MoveEntry with the
@@ -449,12 +710,13 @@ export default function BattlePage() {
                         activeMon && recordsForFormat[activeMon.species]
                             ? (recordsForFormat[activeMon.species].moves || []).find((m) => m.id === move.id)
                             : null;
+                    const isPending = pendingMove?.moveId === move.id;
                     return (
                         <MoveButton
                             key={move.id}
                             move={move}
                             moveMeta={moveMeta}
-                            busy={busy}
+                            busy={busy || (isPending && !!targetOptions)}
                             disabledByState={movesDisabledByState}
                             onMove={commitMove}
                             foe={withMeta(foeMon)}
@@ -480,7 +742,8 @@ export default function BattlePage() {
             </div>
 
             {/* Bench row: horizontal scroll-snap strip on mobile, inline row
-                on desktop (C1 §3.2/§3.3). */}
+                on desktop (C1 §3.2/§3.3). P4 (doubles): the bench is the 4
+                remaining mons (6-team − 2 active) — the same row, 4 chips. */}
             {bench.length > 0 && (
                 <div className="mt-3">
                     {benchSwitchable && (
@@ -521,6 +784,12 @@ export default function BattlePage() {
                             Previous battle was abandoned
                         </span>
                     )}
+                    {/* Q2: the battle-sound master toggle (44px target). `active`
+                        says a battle is running so the ON flip can (re)start
+                        the BGM loop inside the gesture. */}
+                    <div className="ml-auto">
+                        <SoundToggle active={phase === "battle" || phase === "over"} />
+                    </div>
                 </div>
             </div>
 
@@ -562,6 +831,7 @@ export default function BattlePage() {
                                 onSelect={setLeadIndex}
                                 onStart={() => leadIndex != null && commitLead(leadIndex)}
                                 busy={busy}
+                                secondLead={secondLead}
                             />
                         )}
                         {laneError && (
@@ -660,27 +930,75 @@ export default function BattlePage() {
                                 </div>
                             ) : (
                                 <>
-                                    {/* Arena: foe plate then your plate (C1 §3.3 mobile order).
-                                        D3 §2.2: the plates mount on the active species —
-                                        a switch unmounts the outgoing mon and remounts the
-                                        incoming one, which is what makes bs-switch-in a
-                                        clean mount-animation. */}
-                                    <PokemonPlate
-                                        key={`foe:${foeMon?.species || "none"}`}
-                                        mon={withMeta(foeMon)}
-                                        side="foe"
-                                        dexMap={dexMap}
-                                        rootRef={foePlateRef}
-                                        statusChipRef={foeChipRef}
-                                    />
-                                    <PokemonPlate
-                                        key={`yours:${activeMon?.species || "none"}`}
-                                        mon={withMeta(activeMon)}
-                                        side="yours"
-                                        dexMap={dexMap}
-                                        rootRef={yourPlateRef}
-                                        statusChipRef={yourChipRef}
-                                    />
+                                    {/* Arena (C1 §3.3 mobile order: foe row then
+                                        own row). P4 (doubles): two compact plates
+                                        per side (the h-clamped variant so two fit
+                                        at 390px), each a target surface when a
+                                        target-needing move is pending. D3 §2.2:
+                                        a plate mounts on its slot + species — a
+                                        switch unmounts the outgoing mon and
+                                        remounts the incoming one (bs-switch-in).
+                                        Singles renders the exact original
+                                        two-plate block (byte-identical). */}
+                                    {isDoubles ? (
+                                        <>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                {foesArr.map((mon, i) => {
+                                                    const loc = targetSlotFor("foe", i);
+                                                    return (
+                                                        <PokemonPlate
+                                                            key={`foe:${i}:${mon?.species || "none"}`}
+                                                            mon={mon}
+                                                            side="foe"
+                                                            dexMap={dexMap}
+                                                            compact
+                                                            rootRef={setSlotRefs("foe", i)}
+                                                            statusChipRef={i === 0 ? foeChipRef : undefined}
+                                                            isTarget={loc != null}
+                                                            onTarget={loc != null ? () => commitTargetedMove(loc) : undefined}
+                                                        />
+                                                    );
+                                                })}
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                {actives.map((mon, i) => {
+                                                    const loc = targetSlotFor("yours", i);
+                                                    return (
+                                                        <PokemonPlate
+                                                            key={`yours:${i}:${mon?.species || "none"}`}
+                                                            mon={mon}
+                                                            side="yours"
+                                                            dexMap={dexMap}
+                                                            compact
+                                                            rootRef={setSlotRefs("yours", i)}
+                                                            statusChipRef={i === 0 ? yourChipRef : undefined}
+                                                            isTarget={loc != null}
+                                                            onTarget={loc != null ? () => commitTargetedMove(loc) : undefined}
+                                                        />
+                                                    );
+                                                })}
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <PokemonPlate
+                                                key={`foe:${foeMon?.species || "none"}`}
+                                                mon={withMeta(foeMon)}
+                                                side="foe"
+                                                dexMap={dexMap}
+                                                rootRef={foePlateRef}
+                                                statusChipRef={foeChipRef}
+                                            />
+                                            <PokemonPlate
+                                                key={`yours:${activeMon?.species || "none"}`}
+                                                mon={withMeta(activeMon)}
+                                                side="yours"
+                                                dexMap={dexMap}
+                                                rootRef={yourPlateRef}
+                                                statusChipRef={yourChipRef}
+                                            />
+                                        </>
+                                    )}
 
                                     {controlCard}
                                 </>
