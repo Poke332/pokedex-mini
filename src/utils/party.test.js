@@ -19,7 +19,7 @@ import {
     resolveSpeciesForFormGate,
 } from "./pokemonSets.js";
 import { loadParty, saveParty, resetParty, PARTY_STORAGE_KEY } from "./partyStore.js";
-import { unresolvedMoves, PARTY_FORMATS } from "./party.js";
+import { unresolvedMoves, PARTY_FORMATS, GEN_DEX_END, setFormatIssues } from "./party.js";
 
 // A minimal C2 §4 record (charizard @ gen9ou, C2 §4 example fields).
 const record = {
@@ -307,5 +307,62 @@ test("PARTY_FORMATS defaults to gen9ou and carries wire ids", () => {
     for (const f of PARTY_FORMATS) {
         assert.match(f.id, /^[a-z0-9]+$/, "ids are Showdown wire values");
         assert.ok(f.label.length > 0);
+        assert.ok(f.group.length > 0, "every format carries an optgroup label");
     }
+});
+
+// --- G2 (multi-gen) ----------------------------------------------------------------
+// The full cross-gen set the C4 sim service validates (G1). gen4/letsgo/natdex are
+// NOT offered — sim 0.11.11 rejects them, so they must never appear here.
+test("PARTY_FORMATS is the cross-gen set: 13 formats, gen9 tiers first, no rejected gens", () => {
+    const ids = PARTY_FORMATS.map((f) => f.id);
+    // the original 4 gen9 tiers stay first (back-compat — a stored party.format
+    // like "gen9doublesou" still resolves to a real option).
+    assert.deepEqual(
+        ids.slice(0, 4),
+        ["gen9ou", "gen9ubers", "gen9uu", "gen9doublesou"],
+        "existing 4 keep their order (back-compat)",
+    );
+    // the new tiers are all offered.
+    for (const id of [
+        "gen9monotype",
+        "gen8ou", "gen8ubers", "gen8uu", "gen8doublesou", "gen8monotype",
+        "gen7ou", "gen6ou", "gen5ou",
+    ]) {
+        assert.ok(ids.includes(id), `format ${id} is offered`);
+    }
+    assert.equal(ids.length, 13, "13 total (5 gen9 + 5 gen8 + 1 gen7 + 1 gen6 + 1 gen5)");
+    // the sim-rejected gens are deliberately absent.
+    for (const bad of ["gen4ou", "letsgo", "natdexou"]) {
+        assert.ok(!ids.includes(bad), `${bad} is NOT offered (sim rejects it)`);
+    }
+});
+
+test("an old stored format still loads: loadParty keeps a format id even when the team is empty", () => {
+    // A party stored under a cross-gen format (gen5ou) round-trips intact — no
+    // migration, the format id is preserved as-is.
+    const store = fakeStorage();
+    saveParty({ format: "gen5ou", team: [] }, store);
+    const p = loadParty(store);
+    assert.equal(p.format, "gen5ou", "stored cross-gen format is preserved on load");
+});
+
+test("setFormatIssues: a gen-mismatched set reports its one-line problem, a legal set reports null", () => {
+    // A record whose dexNum is above the picked format's gen cutoff -> problem.
+    const ogerponRec = { species: "Ogerpon", dexNum: 1017 };
+    const p = setFormatIssues({ species: "ogerpon" }, ogerponRec, 5);
+    assert.equal(p, "Ogerpon (#1017) is not available in Gen 5");
+    // The same record at its own gen (9) is fine.
+    assert.equal(setFormatIssues({ species: "ogerpon" }, ogerponRec, 9), null, "gen9 cutoff 1025 covers #1017");
+    // A low-dex species is available in every offered gen.
+    const charRec = { species: "Charizard", dexNum: 6 };
+    assert.equal(setFormatIssues({ species: "charizard" }, charRec, 5), null);
+    // A record with no dexNum (or a still-loading null record) reports nothing —
+    // the service validator stays the final authority.
+    assert.equal(setFormatIssues({ species: "x" }, { species: "X" }, 5), null, "no dexNum -> no advisory");
+    assert.equal(setFormatIssues({ species: "x" }, null, 5), null, "null record -> no advisory");
+});
+
+test("GEN_DEX_END is the shared cutoff table (matches the lane's)", () => {
+    assert.deepEqual(GEN_DEX_END, { 5: 649, 6: 721, 7: 809, 8: 905, 9: 1025 });
 });

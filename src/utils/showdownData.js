@@ -276,6 +276,30 @@ export const buildSpeciesRecord = (data, speciesId, formatId) => {
 // All species ids present in the pokedex (for the search-to-add list).
 export const buildSpeciesList = (data) => Object.keys(data.pokedex).sort();
 
+// G2 (multi-gen picker filter): end-of-gen National-Dex numbers. The pokedex
+// dump carries no per-generation field, so `num` is the availability
+// discriminator: a base species is available in generation G iff
+// num <= GEN_DEX_END[G]. G1 grounding verified against the live dump (max
+// num 1025; charizard #6 every gen, arceus #493 / victini #494 gen 5+,
+// ogerpon #1017 & palafin #964 gen 9 only). Only the gen 5–9 formats are
+// offered (gen4/Let's-Go are out of scope per G1), so these are the only
+// cutoffs that apply.
+export const GEN_DEX_END = { 5: 649, 6: 721, 7: 809, 8: 905, 9: 1025 };
+
+// The picker's species pool for generation G: pokedex ids that CARRY a `num`
+// at or below the gen's dex end. Forme sub-ids without a `num` (37 of them:
+// burmysandy, gastrodoneast, shelloseast …) are dropped — the picker lists
+// base species (the D1 form-gate handles formes via their base record), so a
+// null num is a filter-out, never a crash. A gen outside the map applies no
+// cutoff (nothing is hidden) rather than erroring.
+export const buildSpeciesListForGen = (data, gen) => {
+    const cutoff = GEN_DEX_END[gen];
+    return Object.keys(data.pokedex).filter((id) => {
+        const num = data.pokedex[id].num;
+        return typeof num === "number" && (cutoff === undefined || num <= cutoff);
+    }).sort();
+};
+
 // The pinned C2 §4 nested shape for one species across several formats:
 // { [formatId]: record|null }
 export const buildSpeciesRecordsForFormats = (data, speciesId, formatIds) => {
@@ -333,6 +357,15 @@ export const getSpeciesRecordsForFormats = async (speciesId, formatIds, fetchFn)
 export const getSpeciesList = async (fetchFn) => {
     const data = await loadShowdownIndex(fetchFn);
     return buildSpeciesList(data);
+};
+
+// G2 (multi-gen picker filter): the base-species pool for generation G —
+// `getSpeciesList` results with ids whose dex `num` exceeds the gen's cutoff
+// (or carry no `num` at all) removed. Back-compat: `getSpeciesList` is
+// unchanged; this is the additive helper the /party picker uses.
+export const getSpeciesListForGen = async (gen, fetchFn) => {
+    const data = await loadShowdownIndex(fetchFn);
+    return buildSpeciesListForGen(data, gen);
 };
 
 // Exact C2 §4 top-level shape: { [speciesId]: { [formatId]: record|null } }.
