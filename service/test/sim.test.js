@@ -192,6 +192,13 @@ test('end LOGDATA mirrors result(): winner name + turn count', () => {
     assert.strictEqual(final.winner, res.winner);
 });
 
+test('doubles: a 6-mon party passes /team/validate for gen9doublesou', () => {
+    const out = handle('POST', '/team/validate', { format: 'gen9doublesou', team: P1_DOUBLES });
+    assert.strictEqual(out.status, 200);
+    assert.strictEqual(out.body.valid, true, `fixture is legal: ${JSON.stringify(out.body.problems)}`);
+    assert.deepStrictEqual(out.body.problems, []);
+});
+
 // ---------------------------------------------------------------- doubles
 // The P1 doubles lane (party editor + validation + battle driving) must work
 // end-to-end for gen9doublesou. p2 is auto-generated when omitted.
