@@ -1,7 +1,7 @@
 import { getSpriteUrl } from "../../utils/api";
 import TypeBadge from "../TypeBadge";
 import HpBar from "./HpBar";
-import { parseCondition, statusLabel } from "../../utils/battleLog";
+import { parseCondition, statusLabel, stripHeldItem } from "../../utils/battleLog";
 
 /**
  * One arena plate: an active or foe Pokémon card (C1 §3.2).
@@ -120,9 +120,13 @@ export default function PokemonPlate({ mon, side, dexMap, rootRef, statusChipRef
                     </span>
                 ) : null}
 
-                {/* details line (level / item) — quiet, from the envelope */}
+                {/* details line (level / species) — quiet, from the envelope.
+                    D4 fix 2: the "@ Item" clause is stripped at display —
+                    held items are opponent intel and stay hidden on BOTH
+                    plates (yours and the foe's). The wire contract
+                    (mon.details) keeps the item; this is display-layer only. */}
                 <p className="mt-1 truncate text-xs text-neutral-500">
-                    {mon.details || ""}
+                    {stripHeldItem(mon.details) || ""}
                 </p>
 
                 <div className="mt-2">
