@@ -347,22 +347,31 @@ test("an old stored format still loads: loadParty keeps a format id even when th
     assert.equal(p.format, "gen5ou", "stored cross-gen format is preserved on load");
 });
 
-test("setFormatIssues: a gen-mismatched set reports its one-line problem, a legal set reports null", () => {
-    // A record whose dexNum is above the picked format's gen cutoff -> problem.
+test("setFormatIssues: a set outside the picked gen's single-gen window is flagged, inside is not", () => {
+    // G4 window rule: dexNum must fall in (GEN_DEX_END[G-1], GEN_DEX_END[G]].
+    // A record whose dexNum is above the picked format's gen window end -> problem.
     const ogerponRec = { species: "Ogerpon", dexNum: 1017 };
-    const p = setFormatIssues({ species: "ogerpon" }, ogerponRec, 5);
-    assert.equal(p, "Ogerpon (#1017) is not available in Gen 5");
-    // The same record at its own gen (9) is fine.
-    assert.equal(setFormatIssues({ species: "ogerpon" }, ogerponRec, 9), null, "gen9 cutoff 1025 covers #1017");
-    // A low-dex species is available in every offered gen.
-    const charRec = { species: "Charizard", dexNum: 6 };
-    assert.equal(setFormatIssues({ species: "charizard" }, charRec, 5), null);
+    assert.equal(setFormatIssues({ species: "ogerpon" }, ogerponRec, 5), "Ogerpon (#1017) is not available in Gen 5");
+    // The same record at its own gen (9) is fine (1017 in (905,1025]).
+    assert.equal(setFormatIssues({ species: "ogerpon" }, ogerponRec, 9), null, "gen9 window (905,1025] covers #1017");
+    // G4 tightening: a mon BELOW the picked gen's window floor is also flagged —
+    // Garchomp #445 in a Gen 9 team (floor 905) is not available, even though
+    // the old cumulative rule (445 <= 1025) would have let it through.
+    const garchompRec = { species: "Garchomp", dexNum: 445 };
+    assert.equal(setFormatIssues({ species: "garchomp" }, garchompRec, 9), "Garchomp (#445) is not available in Gen 9");
     // A record with no dexNum (or a still-loading null record) reports nothing —
     // the service validator stays the final authority.
     assert.equal(setFormatIssues({ species: "x" }, { species: "X" }, 5), null, "no dexNum -> no advisory");
     assert.equal(setFormatIssues({ species: "x" }, null, 5), null, "null record -> no advisory");
+    // An un-offered gen that IS in the table (4) still has a window —
+    // (0,493] here — so Ogerpon #1017 is outside it and flagged. (Party
+    // formats never select gen 4; this just proves the window math applies
+    // whenever the gen is in the table.)
+    assert.equal(setFormatIssues({ species: "x" }, ogerponRec, 4), "Ogerpon (#1017) is not available in Gen 4");
+    // A gen with NO table entry (10) has no window -> no advisory.
+    assert.equal(setFormatIssues({ species: "x" }, ogerponRec, 10), null, "unknown gen -> no window -> no advisory");
 });
 
-test("GEN_DEX_END is the shared cutoff table (matches the lane's)", () => {
-    assert.deepEqual(GEN_DEX_END, { 5: 649, 6: 721, 7: 809, 8: 905, 9: 1025 });
+test("GEN_DEX_END is the shared G4 window table (floor + ends, gen 4–9)", () => {
+    assert.deepEqual(GEN_DEX_END, { 4: 493, 5: 649, 6: 721, 7: 809, 8: 905, 9: 1025 });
 });

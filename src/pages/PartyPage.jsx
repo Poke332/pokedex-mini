@@ -89,13 +89,16 @@ export default function PartyPage() {
     }, [format, team]);
 
     // Species pool for the add section (module-wide cache in the data lane).
-    // G2 (multi-gen picker filter): the pool is gated by the SELECTED format's
-    // generation — getSpeciesListForGen hides species whose national-dex `num`
-    // exceeds the gen's cutoff (and drops the 37 num-less forme sub-ids), so a
-    // Gen 5 OU picker never lists Ogerpon/Palafin. When the format changes the
-    // effect re-runs and the pool re-filters to the new gen. The lane-error
-    // banner keys off `format` (laneErrorFor === format), so a stale error from
-    // a previous format never shows; no synchronous reset.
+    // G4 (single-gen window): the pool is gated by the SELECTED format's
+    // generation — getSpeciesListForGen keeps ONLY that gen's introductions
+    // (the dex-num window (end[G-1], end[G]] — G2's cumulative "num <= end[G]"
+    // is gone, so a Gen 9 pool never lists Garchomp/Abomasnow and a Gen 5
+    // pool never lists Ogerpon/Palafin). Forme sub-ids without a `num`
+    // (37 of them) are dropped; an unknown gen yields an empty pool, not a
+    // fallback. When the format changes the effect re-runs and the pool
+    // re-filters to the new gen's window. The lane-error banner keys off
+    // `format` (laneErrorFor === format), so a stale error from a previous
+    // format never shows; no synchronous reset.
     useEffect(() => {
         let cancelled = false;
         getSpeciesListForGen(genFromFormat(format))
@@ -123,9 +126,10 @@ export default function PartyPage() {
         [team, visibleCandidateIds],
     );
 
-    // G2 (multi-gen) format-switch re-gate. Team members whose species is no
-    // longer available in the picked format's generation (dex `num` above the
-    // gen cutoff) are surfaced as per-set problems — NOT silently dropped.
+    // G4 (single-gen window) format-switch re-gate. Team members whose species
+    // falls outside the picked format's generation window (dex `num` below
+    // the floor or above the end — e.g. a Garchomp stored in a Gen 9 team)
+    // are surfaced as per-set problems — NOT silently dropped.
     // Advisory until the lane records resolve (null record -> no report); the
     // service validator remains the final authority on start.
     const genProblems = useMemo(() => {
@@ -172,10 +176,10 @@ export default function PartyPage() {
         if (editingIndex === i) { setEditingIndex(null); setDraft(null); }
         setTeam((t) => t.filter((_, idx) => idx !== i));
     };
-    // G2 (multi-gen) format switch: keep the whole team — only the selected
-    // format changes. The lane re-queries records for the new format (the
-    // wantedKey effect re-keys on `format`), the picker re-filters to the new
-    // gen's species pool, and team members no longer available in that gen
+    // G4 (single-gen window) format switch: keep the whole team — only the
+    // selected format changes. The lane re-queries records for the new format
+    // (the wantedKey effect re-keys on `format`), the picker re-filters to the
+    // new gen's single-gen pool, and team members outside that gen's window
     // are surfaced by `genProblems` below (never dropped). Page counter is
     // reset so the re-filtered pool opens at page 1, and the service-level
     // problems are cleared (the team has not been re-validated yet).
@@ -256,13 +260,13 @@ export default function PartyPage() {
         n: s ? unresolvedMoves(s, records[s.species]) : 0,
     }));
 
-    // G2 (multi-gen picker filter): the legibility line for the generation
-    // gate. The picker's species pool is already re-filtered to this format's
-    // gen (getSpeciesListForGen); the hint names the gate so an empty/short
-    // list reads as "filtered by generation", not "broken".
+    // G4 (single-gen window): the legibility line for the generation gate.
+    // The picker's species pool is re-filtered to ONLY this format's gen's
+    // introductions (getSpeciesListForGen's num window), so an empty/short
+    // list reads as "only this generation's Pokémon", not "broken".
     const gateGen = genFromFormat(format);
     const gateFormatLabel = PARTY_FORMATS.find((f) => f.id === format)?.label || format;
-    const genGateHint = `${gateFormatLabel} — showing Pokémon available through Gen ${gateGen}`;
+    const genGateHint = `${gateFormatLabel} — Gen ${gateGen} Pokémon only`;
 
     const addSection = (
         <section id="add-to-party" aria-label="Add to party" className="w-full border border-neutral-200 bg-white p-4 rounded-lg">
@@ -271,9 +275,9 @@ export default function PartyPage() {
                     {team.length ? "Add to party" : "Search for your first Pokémon"}
                 </h2>
                 <SearchBar onSearch={(q) => { setQuery(q); setPage(1); }} placeholder="Search Pokémon by name" />
-                {/* G2 (multi-gen picker filter): the generation gate in plain
-                    words — the pool below is already filtered to this format's
-                    gen, so name the cutoff instead of a mystery short list. */}
+                {/* G4 (single-gen window): the generation gate in plain words
+                    — the pool below is ONLY this format's gen's introductions,
+                    so name the window instead of a mystery short list. */}
                 <p className="text-xs text-neutral-400">{genGateHint}</p>
                 {!speciesList
                     ? <p className="text-sm text-neutral-500">Loading Pokémon list…</p>

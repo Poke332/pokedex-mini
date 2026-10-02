@@ -66,25 +66,48 @@ const fixture = () => ({
             types: ["Electric"],
             abilities: { "0": "Static", "1": "Lightning Rod" },
         },
-        // G2 (multi-gen picker filter): the card's grounding species. The pokedex
-        // dump has no per-gen field, so `num` is the availability discriminator
-        // (available in gen G iff num <= GEN_DEX_END[G]).
+        // G4 (single-gen window): the card's grounding species. The pokedex dump
+        // has no per-gen field, so `num` (the intro dex number) is the
+        // availability discriminator: a species belongs to generation G iff
+        // num is in (GEN_DEX_END[G-1], GEN_DEX_END[G]]. Id forms match the live
+        // dump (no num-suffix on the base id; forme sub-ids are separate keys):
+        //   abomasnow #460 + garchomp #445 are gen-4 mons (below the offered
+        //   floors) — never in an offered-gen pool.
+        //   victini #494 sits just inside the gen-5 window floor (493,649].
         //   palafin #964 + ogerpon #1017 are gen9-only (the card's examples).
-        //   pecharunt #1025 sits exactly at the gen9 cutoff (1025) and above the
-        //   gen8 cutoff (905) — the "mon at the cutoff" boundary case.
-        palafin964: {
+        //   pecharunt #1025 sits exactly at the gen9 window end (1025) — the
+        //   "mon at the boundary" case.
+        abomasnow: {
+            num: 460,
+            name: "Abomasnow",
+            types: ["Grass", "Ice"],
+            abilities: { "0": "Snow Warning" },
+        },
+        garchomp: {
+            num: 445,
+            name: "Garchomp",
+            types: ["Ground", "Dragon"],
+            abilities: { "0": "Sand Veil" },
+        },
+        victini: {
+            num: 494,
+            name: "Victini",
+            types: ["Psychic", "Fire"],
+            abilities: { "0": "Victory Star" },
+        },
+        palafin: {
             num: 964,
             name: "Palafin",
             types: ["Water"],
             abilities: { "0": "Torrent" },
         },
-        ogerpon1017: {
+        ogerpon: {
             num: 1017,
             name: "Ogerpon",
             types: ["Grass"],
             abilities: { "0": "Moxie" },
         },
-        pecharunt1025: {
+        pecharunt: {
             num: 1025,
             name: "Pecharunt",
             types: ["Poison", "Ground"],
@@ -355,65 +378,71 @@ test("buildRecordsForSpecies returns the pinned two-level shape", () => {
 test("buildSpeciesList returns sorted pokedex species ids (incl. forme sub-ids)", () => {
     const list = buildSpeciesList(fixture());
     assert.deepEqual(list, [
-        "burmysandy", "charizard", "charizardgmax", "charizardmegax",
-        "ogerpon1017", "palafin964", "pecharunt1025",
-        "pikachu", "pikachugmax",
+        "abomasnow", "burmysandy", "charizard", "charizardgmax", "charizardmegax",
+        "garchomp", "ogerpon", "palafin", "pecharunt",
+        "pikachu", "pikachugmax", "victini",
     ]);
 });
 
-// G2 (multi-gen picker filter): the per-generation species pool. A base
-// species is available in generation G iff its National-Dex `num` is <= the
-// gen's cutoff (GEN_DEX_END). The picker offers ONLY base species for that gen,
-// so gen9-only mons (Ogerpon #1017, Palafin #964) are hidden under older gens,
-// and the num-less forme sub-ids never appear and never crash the filter.
-test("GEN_DEX_END is the authoritative end-of-gen cutoff table (gen 5–9)", () => {
-    assert.deepEqual(GEN_DEX_END, { 5: 649, 6: 721, 7: 809, 8: 905, 9: 1025 });
+// G4 (single-gen window): the picker's pool for generation G is ONLY that
+// generation's introductions — the num window (GEN_DEX_END[G-1],
+// GEN_DEX_END[G]] (strict lower, inclusive upper). G2's cumulative rule
+// (num <= end[G]) is gone: gen-4 mons (Abomasnow #460, Garchomp #445) are
+// hidden under every offered gen (5–9), gen-9 mons (Ogerpon #1017, Palafin
+// #964) are hidden under older gens, and a num-less forme sub-id (burmysandy)
+// never appears in any pool and never crashes the filter.
+test("GEN_DEX_END carries the G4 floor (gen 4) next to the gen 5–9 ends", () => {
+    // The 4:493 entry exists solely as the FLOOR of the Gen 5 window; gens
+    // 5–9 are the ones PARTY_FORMATS offers.
+    assert.deepEqual(GEN_DEX_END, { 4: 493, 5: 649, 6: 721, 7: 809, 8: 905, 9: 1025 });
 });
 
-test("buildSpeciesListForGen gen5: hides Ogerpon (#1017) & Palafin (#964), keeps Charizard (#6)", () => {
+test("buildSpeciesListForGen gen5: the single-gen window (493,649] — Victini in, older mons out", () => {
     const pool = buildSpeciesListForGen(fixture(), 5);
-    assert.ok(pool.includes("charizard"), "Charizard #6 is available in every offered gen");
-    assert.ok(pool.includes("pikachu"), "Pikachu #25 is available in gen5");
-    assert.ok(!pool.includes("ogerpon1017"), "Ogerpon #1017 > gen5 cutoff 649 → hidden");
-    assert.ok(!pool.includes("palafin964"), "Palafin #964 > gen5 cutoff 649 → hidden");
-    assert.ok(!pool.includes("pecharunt1025"), "Pecharunt #1025 > gen5 cutoff 649 → hidden");
+    assert.ok(pool.includes("victini"), "Victini #494 is just inside the gen5 floor → shown");
+    assert.ok(!pool.includes("charizard"), "Charizard #6 < floor 493 → hidden (Gen 1 mon)");
+    assert.ok(!pool.includes("abomasnow"), "Abomasnow #460 < floor 493 → hidden");
+    assert.ok(!pool.includes("garchomp"), "Garchomp #445 < floor 493 → hidden");
+    assert.ok(!pool.includes("ogerpon"), "Ogerpon #1017 > end 649 → hidden");
+    assert.ok(!pool.includes("palafin"), "Palafin #964 > end 649 → hidden");
+    assert.ok(!pool.includes("pecharunt"), "Pecharunt #1025 > end 649 → hidden");
     // the num-less forme sub-id is dropped, not retained (and no crash).
     assert.ok(!pool.includes("burmysandy"), "num-less forme id is dropped, not retained");
 });
 
-test("buildSpeciesListForGen gen9: shows all base species incl. Ogerpon, Palafin, Pecharunt", () => {
+test("buildSpeciesListForGen gen9: the single-gen window (905,1025] — Ogerpon/Palafin in, Garchomp out", () => {
     const pool = buildSpeciesListForGen(fixture(), 9);
-    assert.ok(pool.includes("charizard"));
-    assert.ok(pool.includes("ogerpon1017"), "Ogerpon #1017 <= 1025 → shown in gen9");
-    assert.ok(pool.includes("palafin964"), "Palafin #964 <= 1025 → shown in gen9");
-    assert.ok(pool.includes("pecharunt1025"), "Pecharunt #1025 == cutoff 1025 → shown in gen9");
+    assert.ok(pool.includes("ogerpon"), "Ogerpon #1017 in (905,1025] → shown in gen9");
+    assert.ok(pool.includes("palafin"), "Palafin #964 in (905,1025] → shown in gen9");
+    assert.ok(pool.includes("pecharunt"), "Pecharunt #1025 == window end → shown (inclusive upper)");
+    assert.ok(!pool.includes("garchomp"), "Garchomp #445 < floor 905 → hidden under a Gen 9 format");
+    assert.ok(!pool.includes("abomasnow"), "Abomasnow #460 < floor 905 → hidden under a Gen 9 format");
+    assert.ok(!pool.includes("charizard"), "Charizard #6 → hidden (Gen 1 mon)");
     assert.ok(!pool.includes("burmysandy"), "num-less forme still dropped in gen9");
 });
 
-test("buildSpeciesListForGen: a mon exactly at a gen's cutoff (num==cutoff) is shown for that gen", () => {
-    // Pecharunt #1025 is exactly the gen9 cutoff (num <= cutoff → inclusive):
-    // shown in gen9, hidden in every offered older gen (their cutoffs are lower).
-    assert.ok(buildSpeciesListForGen(fixture(), 9).includes("pecharunt1025"), "gen9 cutoff 1025: shown");
-    assert.ok(!buildSpeciesListForGen(fixture(), 8).includes("pecharunt1025"), "gen8 cutoff 905: hidden");
+test("buildSpeciesListForGen: a mon exactly at a window end (num==end) is in that gen only", () => {
+    // Pecharunt #1025 is exactly the gen9 window end (inclusive upper):
+    // shown in gen9, hidden in every offered older gen (their ends are lower).
+    assert.ok(buildSpeciesListForGen(fixture(), 9).includes("pecharunt"), "gen9 window end 1025: shown");
+    assert.ok(!buildSpeciesListForGen(fixture(), 8).includes("pecharunt"), "gen8 window (809,905]: hidden");
     // The same boundary logic for the card's gen9-only examples, one gen lower.
-    assert.ok(!buildSpeciesListForGen(fixture(), 8).includes("ogerpon1017"), "Ogerpon #1017 > 905 → hidden in gen8");
-    assert.ok(!buildSpeciesListForGen(fixture(), 8).includes("palafin964"), "Palafin #964 > 905 → hidden in gen8");
-    assert.ok(buildSpeciesListForGen(fixture(), 9).includes("ogerpon1017"), "…but shown in gen9");
+    assert.ok(!buildSpeciesListForGen(fixture(), 8).includes("ogerpon"), "Ogerpon #1017 > 905 → hidden in gen8");
+    assert.ok(!buildSpeciesListForGen(fixture(), 8).includes("palafin"), "Palafin #964 > 905 → hidden in gen8");
+    assert.ok(buildSpeciesListForGen(fixture(), 9).includes("ogerpon"), "…but shown in gen9");
 });
 
-test("buildSpeciesListForGen: a num outside the offered gens applies no cutoff (no crash)", () => {
-    // gen 4 is not offered by G2 (out of scope per G1), so it is absent from
-    // GEN_DEX_END; the pool degrades to "no gen filter" (only num-less formes
-    // dropped) rather than erroring. Every base species is kept.
-    assert.doesNotThrow(() => buildSpeciesListForGen(fixture(), 4), "gen 4 does not throw");
-    const pool = buildSpeciesListForGen(fixture(), 4);
-    assert.ok(pool.includes("ogerpon1017"), "no cutoff for a gen outside the map → kept");
-    assert.ok(pool.includes("palafin964"));
-    assert.ok(!pool.includes("burmysandy"), "num-less forme still dropped");
+test("buildSpeciesListForGen: an unknown gen returns an EMPTY pool, never the cumulative fallback", () => {
+    // A gen not in GEN_DEX_END (3, 10, …) has no window: show NOTHING rather
+    // than degrade to G2's cumulative rule. No crash, no partial pool.
+    for (const gen of [3, 10, 0, undefined]) {
+        assert.doesNotThrow(() => buildSpeciesListForGen(fixture(), gen), `gen ${gen} does not throw`);
+        assert.deepEqual(buildSpeciesListForGen(fixture(), gen), [], `gen ${gen} → empty pool`);
+    }
 });
 
 test("buildSpeciesListForGen: a num-less forme id never appears and never throws", () => {
-    for (const gen of [5, 6, 7, 8, 9]) {
+    for (const gen of [3, 4, 5, 6, 7, 8, 9, 10]) {
         assert.doesNotThrow(() => buildSpeciesListForGen(fixture(), gen), `gen ${gen} does not throw`);
         assert.ok(!buildSpeciesListForGen(fixture(), gen).includes("burmysandy"), `gen ${gen} drops num-less forme`);
     }

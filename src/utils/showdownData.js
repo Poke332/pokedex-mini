@@ -276,27 +276,37 @@ export const buildSpeciesRecord = (data, speciesId, formatId) => {
 // All species ids present in the pokedex (for the search-to-add list).
 export const buildSpeciesList = (data) => Object.keys(data.pokedex).sort();
 
-// G2 (multi-gen picker filter): end-of-gen National-Dex numbers. The pokedex
-// dump carries no per-generation field, so `num` is the availability
-// discriminator: a base species is available in generation G iff
-// num <= GEN_DEX_END[G]. G1 grounding verified against the live dump (max
-// num 1025; charizard #6 every gen, arceus #493 / victini #494 gen 5+,
-// ogerpon #1017 & palafin #964 gen 9 only). Only the gen 5–9 formats are
-// offered (gen4/Let's-Go are out of scope per G1), so these are the only
-// cutoffs that apply.
-export const GEN_DEX_END = { 5: 649, 6: 721, 7: 809, 8: 905, 9: 1025 };
+// G2 (multi-gen picker filter) + G4 (single-gen window): end-of-gen National-Dex
+// numbers. The pokedex dump has no per-generation field, so `num` (the intro
+// dex number) is the availability discriminator. G4 tightened G2's CUMULATIVE
+// rule (num <= end[G], which hid nothing at the top gen) to a SINGLE-GEN
+// WINDOW: a species belongs to generation G iff num is in
+// (GEN_DEX_END[G-1], GEN_DEX_END[G]] — strict lower, inclusive upper = exactly
+// that generation's introductions. The 4:493 entry exists ONLY as the FLOOR of
+// the Gen 5 window (gens 5–9 are the ones PARTY_FORMATS offers; gen 4 is not
+// offered, so its value is a floor provider, not a selectable pool). Grounded
+// against the live dump (max num 1025; abomasnow #460 & garchomp #445 gen 4,
+// victini #494 lowest offered; ogerpon #1017, palafin #964, ironvaliant #1006
+// gen 9 only).
+export const GEN_DEX_END = { 4: 493, 5: 649, 6: 721, 7: 809, 8: 905, 9: 1025 };
 
-// The picker's species pool for generation G: pokedex ids that CARRY a `num`
-// at or below the gen's dex end. Forme sub-ids without a `num` (37 of them:
-// burmysandy, gastrodoneast, shelloseast …) are dropped — the picker lists
-// base species (the D1 form-gate handles formes via their base record), so a
-// null num is a filter-out, never a crash. A gen outside the map applies no
-// cutoff (nothing is hidden) rather than erroring.
+// G4: the picker's species pool for generation G — the SINGLE-GEN window
+// (lo, hi] where lo = GEN_DEX_END[G-1] (0 when G-1 is not in the table, i.e.
+// the floor of the lowest offered gen) and hi = GEN_DEX_END[G]. A species is in
+// the pool iff it carries a numeric `num` inside that window — so a gen-4 mon
+// (Abomasnow #460, Garchomp #445) is hidden under a Gen 5–9 pool, and a gen-9
+// mon (Ogerpon #1017) is hidden under a Gen 5–8 pool. Forme sub-ids without a
+// `num` (37 of them: burmysandy, gastrodoneast, shelloseast …) are dropped —
+// num is not a number, so they never match the window; never a crash. A gen
+// NOT in the table (3, 10, …) returns an EMPTY pool rather than falling back
+// to the cumulative rule, so an unknown gen hides everything.
 export const buildSpeciesListForGen = (data, gen) => {
-    const cutoff = GEN_DEX_END[gen];
+    const hi = GEN_DEX_END[gen];
+    if (typeof hi !== "number") return [];
+    const lo = GEN_DEX_END[gen - 1] || 0;
     return Object.keys(data.pokedex).filter((id) => {
         const num = data.pokedex[id].num;
-        return typeof num === "number" && (cutoff === undefined || num <= cutoff);
+        return typeof num === "number" && num > lo && num <= hi;
     }).sort();
 };
 
@@ -359,10 +369,12 @@ export const getSpeciesList = async (fetchFn) => {
     return buildSpeciesList(data);
 };
 
-// G2 (multi-gen picker filter): the base-species pool for generation G —
-// `getSpeciesList` results with ids whose dex `num` exceeds the gen's cutoff
-// (or carry no `num` at all) removed. Back-compat: `getSpeciesList` is
-// unchanged; this is the additive helper the /party picker uses.
+// G2 (multi-gen picker filter) + G4 (single-gen window): the base-species
+// pool for generation G — `getSpeciesList` results re-filtered to ONLY that
+// gen's introductions (dex-`num` in (GEN_DEX_END[G-1], GEN_DEX_END[G]]; a
+// gen missing from the table yields an empty pool, never a cumulative
+// fallback). Back-compat: `getSpeciesList` is unchanged; this is the
+// additive helper the /party picker uses.
 export const getSpeciesListForGen = async (gen, fetchFn) => {
     const data = await loadShowdownIndex(fetchFn);
     return buildSpeciesListForGen(data, gen);
