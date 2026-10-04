@@ -224,8 +224,27 @@ export class BattleRoom {
                 callerTok = `move ${moveId}${locText ? ' ' + locText : ''}`;
             }
         }
+        // Per-active sub-token list: one sub-token per slot that still holds a
+        // LIVE (present, non-fainted) Pokémon. The sim auto-passes a fainted
+        // active slot (getChoiceIndex's 'move' branch pushes a 'pass' for it),
+        // so emitting a sub-token for a fainted slot shifts every following
+        // sub-token onto an index past the last live Pokémon and the sim
+        // rejects the whole choice ("You sent more choices than unfainted
+        // Pokémon") — the no-substitute stall: the battle never resolves, a
+        // client retry re-creates the room, and that is where the 422/500
+        // surfaces. Fainted/empty slots therefore ship NO sub-token; the
+        // caller's pick (named move or auto 'move') lands on the FIRST live
+        // slot, later live slots get a bare auto-pick.
         const reqActive = ((p1.activeRequest && p1.activeRequest.active) || []);
-        return reqActive.map((e, i) => (i === 0 ? callerTok : (e ? 'move' : 'pass'))).join(', ');
+        const toks = [];
+        let callerPlaced = false;
+        for (let i = 0; i < reqActive.length; i++) {
+            const pk = p1.active && p1.active[i];
+            if (!pk || pk.fainted) continue;            // auto-passed by the sim
+            toks.push(callerPlaced ? 'move' : callerTok);
+            callerPlaced = true;
+        }
+        return toks.length ? toks.join(', ') : 'move';
     }
 
     // Default target-loc for the caller's move in doubles. Choosable target
