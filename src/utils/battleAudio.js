@@ -8,15 +8,20 @@
 //  - switch-in cries: PokeAPI's bundled cries
 //    (pokemon/{id}.cries -> raw.githubusercontent.com/PokeAPI/cries/main/
 //     cries/pokemon/latest/{dexNum}.ogg), lazy-loaded per dex number and
-//    cached; a 404/absence is a silent no-op and NEVER a broken promise
-//    (the card's "no-throw" bar).
+//     cached; a 404/absence is a silent no-op and NEVER a broken promise
+//     (the card's "no-throw" bar).
 //  - move-hit / faint SFX: synthesized on the fly with Web Audio
 //    oscillators — no network dependency (PokeAPI's /v2/sound set is
 //    sparse and 400s in this environment, so not load-bearing). Audio
 //    never gates the D3 CSS animation: the synth is best-effort and every
 //    failure path is a silent no-op.
-//  - BGM: a generated 8-step chiptune loop scheduled on a lookahead timer
-//    (no audio file shipped).
+//  - BGM (S5): a user-supplied .mid battle track served from public/music/
+//    — fetched once (module-level cache in midi.js), decoded by the
+//    dependency-free parser in src/utils/midi.js, and played polyphonically
+//    through the same oscillator note() family the SFX use. A .mid is not
+//    natively playable by <audio>, so the decoded note events ARE the BGM
+//    engine; there is no MIDI library and no build-time converter. A
+//    .mid fetch/decode failure degrades to a silent no-op, same as a cry.
 //
 // Autoplay: browsers block audio before a user gesture. The battle only
 // starts after the user picks a lead, so the page calls startBattleMusic()
@@ -24,14 +29,14 @@
 // unlock path. SFX is additionally gated on an internal `unlocked` flag so
 // a pre-gesture synth call is a documented no-op, not a silent hang.
 //
-// Injectable env (storage + audio factories) mirrors partyStore.js's
-// pattern so the state machine is unit-testable under node (battleAudio
-// .test.js). The browser calls the default export with no args.
+// Injectable env (storage + audio factories + midi fetch) mirrors
+// partyStore.js's pattern so the state machine is unit-testable under node
+// (battleAudio .test.js). The browser calls the default export with no args.
+
+import { defaultBattleTrack, loadMidi } from "./midi.js";
 
 export const CRY_BASE =
     "https://raw.githubusercontent.com/PokeAPI/cries/main/cries/pokemon/latest";
-
-export const BGM_STEPS_PER_LOOP = 8;
 
 // pokedex namespace, same family as pokedex.simulation.party/.battle.
 export const SOUND_TOGGLE_KEY = "pokedex.simulation.battle-sound";
@@ -81,18 +86,22 @@ function defaultAudioContext() {
 }
 
 // ------------------------------------------------------------------- BGM
-// An 8-step chiptune loop: a square lead over a soft pulse, C minor, whose
-// last notes land on the loop's root so the wrap sounds intentional. Note
-// values are semitones over A4; 0 = rest.
-const BGM_STEP_MS = 120;
-const BGM_LEAD = [12, 0, 15, 0, 13, 12, 10, 7];
-const BGM_BASS = [0, 7, 0, 7, 0, 7, 5, 3];
-const BGM_PULSE = [24, 0, 19, 0, 17, 0, 15, 0];
-const HZ_FROM_SEMITONES = (semi) => 440 * Math.pow(2, semi / 12);
+// The decoded .mid events play through the note() helper (polyphonic: every
+// sounding note of the track gets its own oscillator in the pass). Timbre
+// is a plain square — a few notes overlap, so per-note gain stays low and
+// a dedicated gain bus carries the whole BGM at a fixed level (the card's
+// "no volume slider" ruling; stopping the battle disconnects that bus,
+// which silences an already-scheduled pass in one move).
+const MIDI_HZ = (pitch) => 440 * Math.pow(2, (pitch - 69) / 12);
+const BGM_NOTE_GAIN = 0.035;
+const BGM_BUS_GAIN = 0.8;
+// Start the next pass this many seconds before the current one's last note
+// ends, so the loop wrap never gaps.
+const BGM_PASS_MARGIN = 0.05;
 
 // ---------------------------------------------------------------- synthesis
-// One osc+gain note: an oscillator through a gain node into the context
-// destination (the card's fixed volume: no slider in scope).
+// One osc+gain note: an oscillator through a gain node into `dest` (the
+// context destination for SFX; the BGM bus for the loop).
 function note(ctx, type, startHz, endHz, when, durSec, gainVal, dest) {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -119,15 +128,24 @@ function note(ctx, type, startHz, endHz, when, durSec, gainVal, dest) {
  *   storage?: {getItem:(string)=>string|null, setItem:(string,string)=>void} | null,
  *   audioElement?: (url:string)=>HTMLAudioElement,
  *   audioContext?: ()=>AudioContext|null,
- *   intervalMs?: number,
- * }} [env] injectables; the browser default export omits all of them.
+ *   trackUrl?: string,
+ *   fetchMidi?: (url:string)=>Promise<Response>,
+ *   timers?: {setTimeout:Function, clearTimeout:Function},
+ * }} [env] injectables; the browser default export omits all of them
+ * (fetchMidi then defaults to global fetch, timers to the global
+ * setTimeout/clearTimeout).
  * @returns {Object} the controller (see the method typedefs on the object).
  */
 export function createBattleAudio(env = {}) {
     const storage = env.storage != null ? env.storage : defaultStorage();
     const createElement = env.audioElement ?? ((url) => new window.Audio(url));
     const contextFactory = env.audioContext ?? defaultAudioContext;
-    const stepMs = Math.max(60, Number(env.intervalMs) > 0 ? Number(env.intervalMs) : BGM_STEP_MS);
+    const fetchMidi = env.fetchMidi ??
+        (typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : null);
+    // The BGM pass chain schedules a full pass-length timer (~87 s for the
+    // default track). Real timers in the browser; tests inject a no-op pair
+    // so a pending chain timer never pins node's event loop between runs.
+    const timers = env.timers ?? globalThis;
 
     // The master toggle. A persisted value (set by this or another tab /
     // session) is authoritative and read live on every query; the in-memory
@@ -175,8 +193,15 @@ export function createBattleAudio(env = {}) {
     let unlocked = false;
 
     const audioCache = makeAudioElementCache();
-    let stopHandle = null; // the BGM scheduler timer
+    let stopHandle = null; // the BGM pass-chain timer
+    let bgmBus = null; // the BGM gain bus (disconnect = silent stop)
     let musicPlaying = false;
+    let musicStarting = false; // a start is mid-fetch: overlapping starts no-op
+    let musicGen = 0; // bumped on every stop: a fetch that finishes after
+    // a stop must not resurrect the loop (the unmount race)
+    let trackUrl = typeof env.trackUrl === "string" && env.trackUrl
+        ? env.trackUrl
+        : defaultBattleTrack();
 
     // ------------------------------------------------------------- cries
     const playSwitchInCry = (dexNum) => {
@@ -248,46 +273,128 @@ export function createBattleAudio(env = {}) {
     };
 
     // ------------------------------------------------------------- BGM
-    const scheduleStep = (index) => {
-        const c = ensureCtx();
-        if (!c || c.state !== "running") return; // a suspended context schedules nothing
-        const lead = BGM_LEAD[index];
-        const bass = BGM_BASS[index];
-        const pulse = BGM_PULSE[index];
-        const dur = Math.max(0.09, (stepMs - 15) / 1000);
-        try {
-            if (lead) note(c, "square", HZ_FROM_SEMITONES(lead), HZ_FROM_SEMITONES(lead), 0, dur, 0.055, c.destination);
-            if (bass) note(c, "triangle", HZ_FROM_SEMITONES(bass - 12), HZ_FROM_SEMITONES(bass - 12), 0, dur, 0.1, c.destination);
-            if (pulse) note(c, "sine", HZ_FROM_SEMITONES(pulse), HZ_FROM_SEMITONES(pulse), 0, Math.min(0.06, dur * 0.5), 0.04, c.destination);
-        } catch {
-            /* the loop's step is lost; the next step reschedules cleanly */
-        }
+    // Pick a battle .mid track for the NEXT startBattleMusic() call (S5's
+    // "expose a way to pick a track later, don't over-build": one setter,
+    // no picker UI yet). A running loop keeps its track until stopped.
+    const setBattleTrack = (url) => {
+        if (typeof url !== "string" || url.length === 0) return false;
+        trackUrl = url;
+        return true;
     };
 
-    const startBattleMusic = () => {
-        if (musicPlaying) return false; // one loop at a time (idempotent)
+    const startBattleMusic = async () => {
+        if (musicPlaying || musicStarting) return false; // one loop at a time
         if (!enabledNow()) return false;
-        const c = ensureCtx();
+        let c = ensureCtx();
         if (!c) return false;
+        musicStarting = true;
+        const gen = musicGen;
+        let track;
+        try {
+            // Cached per URL in midi.js: a rematch never re-fetches.
+            track = await loadMidi(trackUrl, fetchMidi);
+        } catch {
+            track = null; // .mid fetch/decode failure: silent no-op
+        } finally {
+            musicStarting = false;
+        }
+        if (track === null) return false;
+        // The fetch can outlive a stop (unmount mid-load): the generation
+        // flip discards a late-arriving start — no resurrected loop.
+        if (gen !== musicGen || musicPlaying) return false;
+        // The fetch can outlive a suspended context: re-check + resume
+        // before committing anything audible.
+        c = ensureCtx();
+        if (!c) return false;
+        if (c.state !== "running") {
+            try { await c.resume(); } catch { return false; }
+            if (c.state !== "running") return false;
+        }
+        // A stop during the resume tick is a stop too: re-check the gen.
+        if (gen !== musicGen) return false;
+        // A dedicated gain bus carries the whole BGM at the fixed level
+        // (the "no volume slider" ruling), and disconnecting it on stop
+        // silences every already-scheduled pass in one move.
+        let bus;
+        try {
+            bus = c.createGain();
+            bus.gain.value = BGM_BUS_GAIN;
+            bus.connect(c.destination);
+        } catch {
+            return false; // a broken context: the battle continues, silently
+        }
+        bgmBus = bus;
         musicPlaying = true;
         unlocked = true; // starting the loop IS the post-gesture unlock
-        // The first loop is scheduled up front so the wrap never gaps on
-        // its own beat (a timer-only scheduler would drift).
-        for (let i = 0; i < BGM_STEPS_PER_LOOP; i += 1) scheduleStep(i);
-        let index = BGM_STEPS_PER_LOOP;
-        stopHandle = setInterval(() => {
-            scheduleStep(index % BGM_STEPS_PER_LOOP);
-            index += 1;
-        }, stepMs);
+
+        // One pass: schedule EVERY decoded note event of the track,
+        // offset from the current ctx time. The lead-in silence is trimmed
+        // (the pass starts at the track's first note) so the loop wrap has
+        // no silent gap. Returns the pass length in seconds, or -1 when the
+        // context broke mid-scheduling.
+        const schedulePass = () => {
+            const slice = track.events;
+            const leadIn = slice.length ? slice[0].time : 0;
+            let len = 0;
+            try {
+                for (const ev of slice) {
+                    const offset = Math.max(0, ev.time - leadIn);
+                    const dur = Math.max(0.05, ev.dur);
+                    const hz = MIDI_HZ(ev.note);
+                    note(c, "square", hz, hz, offset, dur, BGM_NOTE_GAIN, bus);
+                    len = Math.max(len, offset + dur);
+                }
+                return Math.max(len, 0.25);
+            } catch {
+                return -1; // the pass is lost; the chain ends the loop quietly
+            }
+        };
+
+        // The pass chain: each timer schedules the next pass BGM_PASS_MARGIN
+        // seconds before the current one's last note ends (no gap at the
+        // wrap). A stop, or a dead pass, breaks the chain. Timer handles
+        // are opaque (the injectable timers pair owns their shape).
+        const chain = (delaySec) => {
+            stopHandle = timers.setTimeout(() => {
+                stopHandle = null;
+                if (!musicPlaying) return; // stopped during the delay
+                const len = schedulePass();
+                if (len > 0) chain(Math.max(0.1, len - BGM_PASS_MARGIN));
+                else stopBattleMusic(); // a dead pass: end the loop quietly
+            }, Math.max(0.1, delaySec) * 1000);
+        };
+
+        const first = schedulePass();
+        if (first < 0) {
+            musicPlaying = false;
+            try { bus.disconnect(); } catch { /* noop */ }
+            bgmBus = null;
+            return false;
+        }
+        chain(first - BGM_PASS_MARGIN);
         return true;
     };
 
     const stopBattleMusic = () => {
-        if (!musicPlaying) return false;
+        if (!musicPlaying) {
+            // Even when nothing is playing, bump the generation so a
+            // startBattleMusic() that is mid-fetch (the fetch already left
+            // its entry check) cannot re-arm the loop after this stop.
+            musicGen += 1;
+            return false;
+        }
         musicPlaying = false;
+        musicGen += 1;
         if (stopHandle != null) {
-            clearInterval(stopHandle);
+            timers.clearTimeout(stopHandle);
             stopHandle = null;
+        }
+        if (bgmBus != null) {
+            // Disconnecting the bus silences the already-scheduled passes
+            // in one move (their oscillators run out and stop() on their
+            // own — no per-oscillator teardown needed).
+            try { bgmBus.disconnect(); } catch { /* noop */ }
+            bgmBus = null;
         }
         return true;
     };
@@ -301,6 +408,7 @@ export function createBattleAudio(env = {}) {
         playHit,
         playFaint,
         unlock,
+        setBattleTrack,
         startBattleMusic,
         stopBattleMusic,
         isMusicPlaying,

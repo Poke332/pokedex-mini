@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "test": "node --test src/utils/showdownData.test.js src/utils/party.test.js src/utils/battleLog.test.js src/utils/typechart.test.js src/utils/battleFx.test.js src/utils/natures.test.js src/utils/battleDoubles.test.js src/utils/battleAudio.test.js",
+    "test": "node --test src/utils/showdownData.test.js src/utils/party.test.js src/utils/battleLog.test.js src/utils/typechart.test.js src/utils/battleFx.test.js src/utils/natures.test.js src/utils/battleDoubles.test.js src/utils/battleAudio.test.js src/utils/midi.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
