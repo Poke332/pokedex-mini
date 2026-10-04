@@ -401,7 +401,7 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                                         type="button"
                                                         aria-label={`Unequip ${f.itemName}`}
                                                         onClick={() => onUpdate({ item: "" })}
-                                                        className="shrink-0 rounded border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-amber-700 hover:bg-amber-100"
+                                                        className="shrink-0 min-h-11 rounded border border-amber-300 bg-white px-2 text-[11px] font-semibold text-amber-700 hover:bg-amber-100"
                                                     >
                                                         Unequip
                                                     </button>
@@ -409,7 +409,7 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                                     <button
                                                         type="button"
                                                         onClick={() => onUpdate({ item: f.item })}
-                                                        className="shrink-0 rounded bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-amber-700"
+                                                        className="shrink-0 min-h-11 rounded bg-amber-600 px-2 text-[11px] font-semibold text-white hover:bg-amber-700"
                                                     >
                                                         Equip
                                                     </button>
@@ -432,7 +432,7 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                                 type="button"
                                                 aria-label={`Unequip ${thisFormGate.itemName}`}
                                                 onClick={() => onUpdate({ item: "" })}
-                                                className="shrink-0 rounded border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-amber-700 hover:bg-amber-100"
+                                                className="shrink-0 min-h-11 rounded border border-amber-300 bg-white px-2 text-[11px] font-semibold text-amber-700 hover:bg-amber-100"
                                             >
                                                 Unequip
                                             </button>
@@ -440,7 +440,7 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                             <button
                                                 type="button"
                                                 onClick={() => onUpdate({ item: thisFormGate.item })}
-                                                className="shrink-0 rounded bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-amber-700"
+                                                className="shrink-0 min-h-11 rounded bg-amber-600 px-2 text-[11px] font-semibold text-white hover:bg-amber-700"
                                             >
                                                 Equip
                                             </button>
@@ -469,7 +469,7 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                 <button
                                     type="button"
                                     onClick={() => setAllIv(31)}
-                                    className={`min-h-8 rounded-lg px-2.5 text-xs font-medium transition-colors ${
+                                    className={`min-h-11 rounded-lg px-2.5 text-xs font-medium transition-colors ${
                                         ivPreset === "full"
                                             ? "bg-blue-800 text-white"
                                             : "border border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-100"
@@ -480,7 +480,7 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                 <button
                                     type="button"
                                     onClick={() => setAllIv(0)}
-                                    className={`min-h-8 rounded-lg px-2.5 text-xs font-medium transition-colors ${
+                                    className={`min-h-11 rounded-lg px-2.5 text-xs font-medium transition-colors ${
                                         ivPreset === "zero"
                                             ? "bg-blue-800 text-white"
                                             : "border border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-100"
@@ -498,7 +498,7 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                         aria-label={`${name}, IV ${k}`}
                                         value={set.ivs?.[k] ?? 31}
                                         onChange={(e) => setOneIv(k, e.target.value)}
-                                        className="mt-0.5 min-h-9 w-full rounded-lg border border-neutral-200 bg-white px-2 py-1.5 text-xs text-neutral-900 focus:outline-none focus:ring-2 focus:ring-red-600"
+                                        className="mt-0.5 min-h-11 w-full rounded-lg border border-neutral-200 bg-white px-2 py-1.5 text-xs text-neutral-900 focus:outline-none focus:ring-2 focus:ring-red-600"
                                     >
                                         {Array.from({ length: 32 }, (_, v) => (
                                             <option key={v} value={v}>{v}</option>
@@ -536,7 +536,7 @@ export default function SetEditor({ set, record, format, loading, onUpdate, onDo
                                         max={MAX_EV}
                                         value={set.evs?.[k] ?? 0}
                                         onChange={(e) => setOneEv(k, e.target.value)}
-                                        className="mt-0.5 min-h-9 w-full rounded-lg border border-neutral-200 bg-white px-2 py-1.5 text-xs text-neutral-900 focus:outline-none focus:ring-2 focus:ring-red-600"
+                                        className="mt-0.5 min-h-11 w-full rounded-lg border border-neutral-200 bg-white px-2 py-1.5 text-xs text-neutral-900 focus:outline-none focus:ring-2 focus:ring-red-600"
                                     />
                                 </label>
                             ))}

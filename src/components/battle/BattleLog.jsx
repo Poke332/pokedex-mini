@@ -92,7 +92,7 @@ export default function BattleLog({ log, collapsible = false, className = "" }) 
                     <div
                         ref={scrollRef}
                         aria-live="polite"
-                        className="max-h-[50dvh] overflow-y-auto p-4 pb-10 lg:max-h-[calc(100dvh-10rem)]"
+                        className="s4-log-scroll overflow-y-auto p-4"
                     >
                         <ol className="flex flex-col gap-1 text-sm text-neutral-700">
                             {rows.map((row, i) => {
@@ -135,7 +135,7 @@ export default function BattleLog({ log, collapsible = false, className = "" }) 
                         <button
                             type="button"
                             onClick={jumpToBottom}
-                            className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-blue-800 px-3 py-1 text-xs font-semibold text-white shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
+                            className="absolute bottom-2 left-1/2 min-h-11 -translate-x-1/2 rounded-full bg-blue-800 px-4 text-xs font-semibold text-white shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
                         >
                             ↓ new
                         </button>

@@ -165,6 +165,63 @@
     animation: bs-status 300ms linear 1;
 }
 
+/* =====================================================================
+   S4 — mobile shell height model (the 390/320 pass).
+   The battle + party pages pin their shell to the viewport so the sticky
+   turn strip's scroll context is the content pane, the ONLY scroller
+   (the window never scrolls; bench/controls scroll under the pinned
+   strip).
+   Headless caveat: EVERY `dvh` line is paired with a `vh` line that
+   comes FIRST — a headless engine that drops unknown dvh units (Lightpanda)
+   still resolves the vh fallback, so the sticky pin holds in a real
+   browser AND a headless measurement. A real browser applies both; the
+   later dvh line wins (dynamic viewport = stable bar height).
+   At <md the app's mobile nav band (the Sidebar brand + chips row) sits
+   above the shell in the Layout flex column; the shell subtracts the
+   band height. Layout measures the band at runtime into `--s4-band-h`
+   (an html-element custom property — exact at any width); 117px is the
+   first-paint fallback (the band's height at 320/390). At md+ the band
+   is gone (the desktop rail takes its place) and the shell is full
+   viewport. */
+.s4-shell {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    height: 100vh;
+    height: 100dvh;
+}
+/* Mobile: subtract the measured nav band height; the party page's footer
+   is a flex child below the pane (never position:fixed), so the band
+   is the only subtraction. */
+@media (max-width: 47.9875rem) {
+    .s4-shell {
+        height: calc(100vh - var(--s4-band-h, 117px));
+        height: calc(100dvh - var(--s4-band-h, 117px));
+    }
+}
+/* The pane is the sole scroller: it grows to the shell's remainder and
+   clips horizontal overflow at ITS edges (no page-level h-scroll). */
+.s4-shell-main {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+/* The battle log's scroll pane (BattleLog): the same vh-first/dvh-second
+   headless caveat, with the desktop side-column variant at lg. The bottom
+   padding clears the floating "↓ new" pill (S4: min-h-11 target). */
+.s4-log-scroll {
+    max-height: 50vh;
+    max-height: 50dvh;
+    padding-bottom: 3.5rem;
+}
+@media (min-width: 64rem) {
+    .s4-log-scroll {
+        max-height: calc(100vh - 10rem);
+        max-height: calc(100dvh - 10rem);
+    }
+}
+
 /* §2.4 — reduced motion: every bs-* keyframe collapses to 0s (the
    classes remain harmless), the HP fill transition goes instant, and
    the busy spinners render static. State stays fully readable via the

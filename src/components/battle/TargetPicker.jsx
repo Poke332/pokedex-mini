@@ -43,7 +43,7 @@ export default function TargetPicker({ move, targetCount, onCancel, busy }) {
                 type="button"
                 onClick={onCancel}
                 disabled={busy}
-                className="min-h-9 shrink-0 self-start rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-semibold text-blue-800 transition-colors hover:bg-blue-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 sm:self-auto"
+                className="min-h-11 shrink-0 self-start rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm font-semibold text-blue-800 transition-colors hover:bg-blue-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 sm:self-auto"
             >
                 Cancel (Esc)
             </button>

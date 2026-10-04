@@ -363,9 +363,10 @@ export default function PartyPage() {
     }
 
     return (
-        <main className="min-h-dvh flex flex-col bg-neutral-50 text-neutral-900">
-            {/* Header band (C1 §2.1) */}
-            <div className="w-full border-b-4 border-red-600 bg-blue-800 px-6 py-6">
+        <main className="s4-shell bg-neutral-50 text-neutral-900">
+            {/* Header band (C1 §2.1) — the band stays natural height; the
+                pane below owns scrolling (S4 shell model). */}
+            <div className="shrink-0 w-full border-b-4 border-red-600 bg-blue-800 px-6 py-6">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                     <h1 className="text-2xl font-semibold tracking-tight text-white">Party Builder</h1>
                     <label className="text-sm font-medium text-blue-100">
@@ -398,7 +399,12 @@ export default function PartyPage() {
                 </div>
             </div>
 
-            <div className="flex w-full flex-1 flex-col items-stretch gap-5 px-4 py-6 md:px-6 md:pb-28">
+            {/* The content pane — S4: the shell's ONLY scroller. The
+                Start-battle footer below is an in-flow shell child pinned
+                to the shell's bottom (never position:fixed), so the content
+                can never hide under it at any width; the old md:pb-28
+                fixed-footer clearance is gone. */}
+            <div className="s4-shell-main flex w-full grow flex-col items-stretch gap-5 px-4 py-6 md:px-6">
                 {/* Data-lane error banner (C1 §2.3) */}
                 {laneError && (
                     <div className="flex items-center justify-between gap-3 rounded-lg border border-red-200 border-l-4 border-l-red-600 bg-white p-4">
@@ -475,9 +481,12 @@ export default function PartyPage() {
                 </section>
             </div>
 
-            {/* Mobile sticky footer (C1 §2.5): Start battle is always reachable
-                while scrolling; pb above (md:pb-28) clears it on desktop. */}
-            <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-neutral-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] md:hidden">
+            {/* Start-battle footer (C1 §2.5) — S4: IN-FLOW, pinned to the
+                shell's bottom (never position:fixed), so the content pane
+                can no longer scroll under it at any width. Still
+                mobile-only: at md+ the content's inline Start-battle
+                section (above) is the action surface, exactly as before. */}
+            <div className="shrink-0 flex gap-3 border-t border-neutral-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] md:hidden">
                 <button
                     type="button"
                     onClick={startBattle}

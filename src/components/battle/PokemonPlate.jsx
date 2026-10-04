@@ -31,6 +31,9 @@ import { parseCondition, statusLabel, stripHeldItem } from "../../utils/battleLo
  *     target-needing move is pending, the legal target plates get a red
  *     ring + pointer + a "target" marker (role="button" so they are
  *     focusable); `onTarget` commits the move with that plate's target-loc.
+ *   - `plateData` — S4: a static `data-battle-plate` hook ("foe:0" /
+ *     "yours:1") the page reads to scroll the first valid target into view
+ *     when targeting mode engages at 390px.
  *
  * @param {{
  *   mon: object,
@@ -50,15 +53,17 @@ import { parseCondition, statusLabel, stripHeldItem } from "../../utils/battleLo
  *   compact — doubles: the clamped two-plates-per-row layout.
  *   isTarget — doubles: this plate is a legal target of the pending move.
  *   onTarget — doubles: commit the pending move on this plate's slot.
+ *   plateData — S4: `data-battle-plate` value for the scroll-into-view hook.
  */
 export default function PokemonPlate({
-    mon, side, dexMap, rootRef, statusChipRef, compact, isTarget, onTarget,
+    mon, side, dexMap, rootRef, statusChipRef, compact, isTarget, onTarget, plateData,
 }) {
     // The empty-plate placeholder (no mon yet): same clamping for compact.
     if (!mon) {
         return (
             <div
                 ref={rootRef}
+                data-battle-plate={plateData}
                 style={side === "foe" ? { "--bs-dir": -1, direction: "rtl" } : { "--bs-dir": 1 }}
                 className={`flex w-full items-center justify-center gap-4 border border-neutral-200 bg-white rounded-lg ${compact ? "p-3" : "p-4"}`}
             >
@@ -91,6 +96,7 @@ export default function PokemonPlate({
     return (
         <div
             ref={rootRef}
+            data-battle-plate={plateData}
             style={dirStyle}
             role={targetable ? "button" : undefined}
             tabIndex={targetable ? 0 : undefined}
@@ -110,7 +116,7 @@ export default function PokemonPlate({
                     }
                     : undefined
             }
-            className={`flex w-full items-center gap-4 border bg-white rounded-lg transition-colors ${compact ? "p-3" : "p-4"} ${
+            className={`relative flex w-full items-center gap-4 border bg-white rounded-lg transition-colors ${compact ? "p-3" : "p-4"} ${
                 isTarget
                     ? "cursor-pointer border-red-600 ring-2 ring-red-600 ring-offset-2 hover:bg-red-600/5 focus-visible:outline-none focus-visible:ring-red-600"
                     : "border-neutral-200"

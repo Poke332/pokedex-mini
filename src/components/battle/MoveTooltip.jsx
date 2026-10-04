@@ -54,7 +54,7 @@ export default function MoveTooltip({ id, move, foe, relations, disabledReason }
         <div
             id={id}
             role="tooltip"
-            className="absolute bottom-full left-1/2 z-20 mb-2 w-60 -translate-x-1/2 rounded-lg border border-neutral-200 bg-white p-3 text-xs shadow-lg sm:w-72"
+            className="absolute bottom-full left-1/2 z-20 mb-2 w-60 max-w-[calc(100vw-2rem)] -translate-x-1/2 rounded-lg border border-neutral-200 bg-white p-3 text-xs shadow-lg sm:w-72"
         >
             <div className="flex items-center gap-2">
                 <p className="min-w-0 flex-1 truncate text-sm font-semibold text-neutral-900">{name}</p>

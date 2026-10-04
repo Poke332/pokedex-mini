@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { NavLink } from "react-router-dom";
 
 const NAV_SECTIONS = [
@@ -57,6 +58,26 @@ function Brand() {
 }
 
 export default function Sidebar() {
+    // S4: the mobile band's measured height drives the battle/party shell's
+    // height (calc(100dvh - band)). The band is the constant single-row chip
+    // strip at 320/390, so publishing offsetHeight on the html element is
+    // exact at any small width. Runs on every page (the Sidebar is inside
+    // Layout) — one listener, no per-page cost. The desktop rail never
+    // publishes (the band div is display:none there and is not measured).
+    const bandRef = useRef(null);
+    useEffect(() => {
+        const el = bandRef.current;
+        if (!el) return;
+        const publish = () => {
+            document.documentElement.style.setProperty(
+                "--s4-band-h",
+                `${el.offsetHeight}px`,
+            );
+        };
+        publish();
+        window.addEventListener("resize", publish);
+        return () => window.removeEventListener("resize", publish);
+    }, []);
     return (
         <>
             {/* Mobile: brand + horizontally scrolling nav chips.
@@ -65,7 +86,7 @@ export default function Sidebar() {
                 widens the whole document at 390px (the nav's own
                 overflow-x-auto only scrolls inside its box). Containing it
                 keeps every page h-scroll-free at 390 (C1 §2.5). */}
-            <div className="min-w-0 overflow-hidden md:hidden">
+            <div ref={bandRef} className="min-w-0 overflow-hidden md:hidden">
                 <Brand />
                 <nav
                     aria-label="Primary"

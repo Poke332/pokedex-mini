@@ -714,6 +714,22 @@ export default function BattlePage() {
             }
         }
     }, []);
+    // S4: entering doubles targeting mode reflows the instruction banner
+    // above the move grid and can push the highlighted field plates off-
+    // screen at 390px (the picker's "collision" symptom). The first valid
+    // highlighted plate (the actual pick surface) scrolls into view on
+    // mobile; on desktop the field already fits, so the guard is width-
+    // gated and the reflow is a no-op there.
+    useEffect(() => {
+        if (!targetOptions || window.matchMedia("(min-width: 64rem)").matches) return;
+        const i = (targetOptions.options || []).findIndex((o) => o && !o.disabled);
+        if (i < 0) return;
+        const rowKey = targetOptions.side === "ally" ? "yours" : "foe";
+        const node = document.querySelector(
+            `[data-battle-plate="${rowKey}:${i}"][role="button"]`,
+        );
+        node?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, [targetOptions]);
 
     // C1 §3.3: the mobile turn strip also carries the most recent log line.
     const lastLogLine = (() => {
@@ -859,9 +875,10 @@ export default function BattlePage() {
 
     // ------------------------------------------------------------ the page
     return (
-        <main className="min-h-dvh bg-neutral-50 text-neutral-900">
-            {/* Header band (C1 §3.1 / §3.2) */}
-            <div className="border-b-4 border-red-600 bg-blue-800 px-6 py-6">
+        <main className="s4-shell bg-neutral-50 text-neutral-900">
+            {/* Header band (C1 §3.1 / §3.2) — shrink-0: the band stays its
+                natural height; below it the pane owns ALL scrolling. */}
+            <div className="shrink-0 border-b-4 border-red-600 bg-blue-800 px-6 py-6">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                     <h1 className="text-2xl font-semibold tracking-tight text-white">
                         {headerTitle}
@@ -883,7 +900,11 @@ export default function BattlePage() {
                 </div>
             </div>
 
-            <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-6 md:px-6">
+            {/* The content pane — S4: the shell's ONLY scroller. Everything
+                above it (the header band) is shrink-0; below, the pane grows
+                and scrolls internally, so the sticky turn strip's scroll
+                context is this pane (the window itself never scrolls). */}
+            <div className="s4-shell-main mx-auto flex w-full max-w-6xl grow flex-col gap-5 px-4 py-6 md:px-6">
                 {/* No team yet */}
                 {phase === "empty" && (
                     <div className="flex w-full flex-col items-center gap-3 rounded-lg border border-neutral-200 bg-white p-8">
@@ -1054,6 +1075,7 @@ export default function BattlePage() {
                                                             compact
                                                             rootRef={setSlotRefs("foe", i)}
                                                             statusChipRef={i === 0 ? foeChipRef : undefined}
+                                                            plateData={`foe:${i}`}
                                                             isTarget={loc != null}
                                                             onTarget={loc != null ? () => commitTargetedMove(loc) : undefined}
                                                         />
@@ -1072,6 +1094,7 @@ export default function BattlePage() {
                                                             compact
                                                             rootRef={setSlotRefs("yours", i)}
                                                             statusChipRef={i === 0 ? yourChipRef : undefined}
+                                                            plateData={`yours:${i}`}
                                                             isTarget={loc != null}
                                                             onTarget={loc != null ? () => commitTargetedMove(loc) : undefined}
                                                         />
