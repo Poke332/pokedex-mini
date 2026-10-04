@@ -328,6 +328,96 @@ export function reconcileLog(prev, slice) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// S2 — health-change double-emit collapse. The sim ships each -damage/-heal
+// TWICE within one turn, split by `|split|` channel markers: once in the
+// absolute total-HP form ("|-damage|p2a: Venusaur|11/272") and once in the
+// scaled-to-100 form ("|-damage|p2a: Venusaur|5/100"). The display wants
+// only the ratio line, so the pair collapses to the scaled one.
+// ---------------------------------------------------------------------------
+
+/**
+ * Facts for a -damage/-heal display line, or null for any other line.
+ * @param {string} line a display-filtered raw log line.
+ * @returns {{family:string, who:string, hp:number, max:number, tail:string}|null}
+ *   family — "damage" | "heal"; who — the ident ("p2a: Venusaur");
+ *   hp/max — the condition numerator/denominator; tail — the status word
+ *   ("" when absent).
+ */
+function healthLineFacts(line) {
+    // " |-damage|p2a: Venusaur|11/272 brn": leading pipe, event, ident, payload.
+    const m = /^\|(-damage|-heal)\|([^|]*)\|([^|]*)/.exec(line);
+    if (!m) return null;
+    const who = m[2].trim();
+    const pieces = m[3].split(/\s+/);
+    const hpm = pieces[0] ? /^(\d+)\/(\d+)$/.exec(pieces[0]) : null;
+    if (!hpm || !who) return null;
+    return {
+        family: m[1],
+        who,
+        hp: Number(hpm[1]),
+        max: Number(hpm[2]),
+        tail: pieces.slice(1).join(" ") || "",
+    };
+}
+
+/**
+ * S2: collapse the sim's double-emitted health-change pair so only the
+ * scaled-to-100 ratio line survives. Pure; operates on the display-filtered
+ * raw lines (after isDisplayLogLine, before parseLogLine).
+ *
+ * Rule: within a single turn, a -damage (resp. -heal) line L pairs with the
+ * next same-family, same-Pokémon health line L' (non-health lines between
+ * them — e.g. a |-status| twin — don't break the pairing; a turn boundary
+ * does, since a double-emit never crosses one). Exactly one of the pair
+ * carries the scaled denominator (max === 100): keep the /100 line, drop
+ * the max-HP twin. Tails must agree: the discarded line may carry no tail
+ * (its emit predates a status the scaled twin reports) or the same one;
+ * two distinct tails never collapse. EQUAL denominators (or a pair where
+ * neither side is 100 — two separate events) are NOT collapsed. Consumed
+ * lines can't re-pair, so a stacked hit + residual tick on one Pokémon
+ * collapses pair-by-pair, not crosswise.
+ *
+ * @param {string[]|null} displayLines display-filtered raw log lines.
+ * @returns {string[]} the same lines with each paired max-HP form removed.
+ */
+export function collapseDoubleEmit(displayLines) {
+    const lines = Array.isArray(displayLines) ? displayLines.map(String) : [];
+    const facts = lines.map(healthLineFacts);
+    const drop = new Set();
+    const consumed = new Set();
+    for (let i = 0; i < lines.length; i += 1) {
+        if (consumed.has(i) || !facts[i]) continue;
+        // Next same-family, same-Pokémon health line, without a turn
+        // boundary between — a double-emit never crosses a turn.
+        let j = -1;
+        for (let k = i + 1; k < lines.length; k += 1) {
+            if (/^\|turn\|/.test(lines[k])) break;
+            if (consumed.has(k)) continue;
+            if (facts[k] && facts[k].family === facts[i].family && facts[k].who === facts[i].who) {
+                j = k;
+                break;
+            }
+        }
+        if (j === -1) continue;
+        const a = facts[i];
+        const b = facts[j];
+        if (a.max === b.max) continue; // no scaled form in the pair
+        let keep;
+        let disc;
+        if (a.max === 100) { keep = i; disc = j; }
+        else if (b.max === 100) { keep = j; disc = i; }
+        else continue; // neither is the scaled form — separate events
+        const keepTail = facts[keep].tail;
+        const discTail = facts[disc].tail;
+        if (discTail !== keepTail && !(discTail === "" && keepTail !== "")) continue;
+        drop.add(disc);
+        consumed.add(i);
+        consumed.add(j);
+    }
+    return lines.filter((_, idx) => !drop.has(idx));
+}
+
 /**
  * D4 fix 2 (fair-play / clutter): hide held items on the arena plates.
  *

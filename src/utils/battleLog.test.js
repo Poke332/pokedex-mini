@@ -20,6 +20,7 @@ import {
     isDisplayLogLine,
     reconcileLog,
     dedupeConsecutiveRows,
+    collapseDoubleEmit,
     stripHeldItem,
 } from "./battleLog.js";
 import { spriteUrlFor } from "./battleSprites.js";
@@ -261,6 +262,135 @@ test("dedupeConsecutiveRows: non-consecutive repeats are kept", () => {
 test("dedupeConsecutiveRows: empty input", () => {
     assert.deepEqual(dedupeConsecutiveRows([]), []);
     assert.deepEqual(dedupeConsecutiveRows(null), []);
+});
+
+// --------------------------------------------------------------- S2
+// The sim ships each health change TWICE (|split| channel markers): the
+// absolute total-HP form and the scaled-to-100 ratio form. collapseDoubleEmit
+// keeps only the /100 line so one hit renders as one row.
+test("collapseDoubleEmit: a doubled -damage pair keeps the /100 ratio line", () => {
+    const lines = [
+        "|turn|1",
+        "|move|p1a: Moltres|Flamethrower|p2a: Venusaur",
+        "|-damage|p2a: Venusaur|11/272",
+        "|-damage|p2a: Venusaur|5/100",
+    ].filter(isDisplayLogLine);
+    assert.deepEqual(collapseDoubleEmit(lines), [
+        "|turn|1",
+        "|move|p1a: Moltres|Flamethrower|p2a: Venusaur",
+        "|-damage|p2a: Venusaur|5/100",
+    ]);
+});
+
+test("collapseDoubleEmit: order-independent — scaled line first still keeps it", () => {
+    const lines = [
+        "|-damage|p2a: Venusaur|5/100",
+        "|-damage|p2a: Venusaur|11/272",
+    ];
+    assert.deepEqual(collapseDoubleEmit(lines), ["|-damage|p2a: Venusaur|5/100"]);
+});
+
+test("collapseDoubleEmit: a genuine hit on a DIFFERENT pokemon is not collapsed", () => {
+    const lines = [
+        "|move|p1a: Moltres|Flamethrower|p2a: Venusaur",
+        "|-damage|p2a: Venusaur|11/272",
+        "|-damage|p2a: Venusaur|5/100",
+        "|move|p1b: Garchomp|Earthquake|p2b: Blissey",
+        "|-damage|p2b: Blissey|100/200",
+        "|-damage|p2b: Blissey|50/100",
+    ];
+    assert.deepEqual(collapseDoubleEmit(lines), [
+        "|move|p1a: Moltres|Flamethrower|p2a: Venusaur",
+        "|-damage|p2a: Venusaur|5/100",
+        "|move|p1b: Garchomp|Earthquake|p2b: Blissey",
+        "|-damage|p2b: Blissey|50/100",
+    ]);
+});
+
+test("collapseDoubleEmit: -heal double-emit collapses the same way", () => {
+    const lines = [
+        "|-heal|p1a: Chansey|340/460",
+        "|-heal|p1a: Chansey|74/100",
+    ];
+    assert.deepEqual(collapseDoubleEmit(lines), ["|-heal|p1a: Chansey|74/100"]);
+});
+
+test("collapseDoubleEmit: tails must agree — disc side may lack the status tail", () => {
+    // The absolute-form emit can predate the status that the scaled twin
+    // reports (D4 audit shape: "330/404" then "82/100 brn"): collapses.
+    assert.deepEqual(collapseDoubleEmit([
+        "|-damage|p2a: Tyranitar|330/404",
+        "|-damage|p2a: Tyranitar|82/100 brn",
+    ]), ["|-damage|p2a: Tyranitar|82/100 brn"]);
+    // Two DIFFERENT status tails are two distinct events: kept.
+    assert.deepEqual(collapseDoubleEmit([
+        "|-damage|p2a: Tyranitar|330/404 par",
+        "|-damage|p2a: Tyranitar|82/100 brn",
+    ]), [
+        "|-damage|p2a: Tyranitar|330/404 par",
+        "|-damage|p2a: Tyranitar|82/100 brn",
+    ]);
+});
+
+test("collapseDoubleEmit: fnt tail collapses (the fainting hit's double-emit)", () => {
+    assert.deepEqual(collapseDoubleEmit([
+        "|-damage|p2a: Venusaur|0/272 fnt",
+        "|-damage|p2a: Venusaur|0/100 fnt",
+    ]), ["|-damage|p2a: Venusaur|0/100 fnt"]);
+});
+
+test("collapseDoubleEmit: equal denominators are separate events, kept", () => {
+    // Two hits on the same pokemon that both read /100-scale or the same
+    // absolute max are NOT one double-emit — nothing collapses.
+    assert.deepEqual(collapseDoubleEmit([
+        "|-damage|p2a: Venusaur|50/100",
+        "|-damage|p2a: Venusaur|50/100",
+    ]), [
+        "|-damage|p2a: Venusaur|50/100",
+        "|-damage|p2a: Venusaur|50/100",
+    ]);
+});
+
+test("collapseDoubleEmit: a turn boundary stops the pairing (no cross-turn collapse)", () => {
+    const lines = [
+        "|-damage|p2a: Venusaur|11/272",
+        "|turn|2",
+        "|-damage|p2a: Venusaur|5/100",
+    ];
+    assert.deepEqual(collapseDoubleEmit(lines), lines);
+});
+
+test("collapseDoubleEmit: a non-health line between the pair does not break it", () => {
+    const lines = [
+        "|-damage|p2a: Tyranitar|330/404",
+        "|-status|p2a: Tyranitar|brn",
+        "|-damage|p2a: Tyranitar|82/100 brn",
+    ];
+    assert.deepEqual(collapseDoubleEmit(lines), [
+        "|-status|p2a: Tyranitar|brn",
+        "|-damage|p2a: Tyranitar|82/100 brn",
+    ]);
+});
+
+test("collapseDoubleEmit: empty/null input", () => {
+    assert.deepEqual(collapseDoubleEmit([]), []);
+    assert.deepEqual(collapseDoubleEmit(null), []);
+});
+
+test("full pipeline (gate + collapse + dedupe + parse): one hit -> ONE row, the /100 ratio", () => {
+    const log = [
+        "|turn|1",
+        "|move|p1a: Moltres|Flamethrower|p2a: Venusaur",
+        "|split|p1",
+        "|-damage|p2a: Venusaur|11/272",
+        "|split|p2",
+        "|-damage|p2a: Venusaur|5/100",
+    ];
+    const rows = dedupeConsecutiveRows(
+        collapseDoubleEmit(log.filter(isDisplayLogLine)).map(parseLogLine),
+    );
+    const damageRows = rows.filter((r) => r.kind === "info" && /took damage/.test(r.text));
+    assert.deepEqual(damageRows, [{ kind: "info", text: "Venusaur took damage (5/100)" }]);
 });
 
 test("isDisplayLogLine keeps human lines + turn dividers", () => {

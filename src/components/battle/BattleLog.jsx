@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { parseLogLine, isDisplayLogLine, dedupeConsecutiveRows } from "../../utils/battleLog";
+import { parseLogLine, isDisplayLogLine, dedupeConsecutiveRows, collapseDoubleEmit } from "../../utils/battleLog";
 
 /**
  * The battle log (C1 §3.2): renders the C2 §2.6 `log[]` lines as prose.
@@ -31,11 +31,15 @@ export default function BattleLog({ log, collapsible = false, className = "" }) 
     const countRef = useRef(0);
 
     // The displayable rows, pre-parsed; turn boundaries become divider rows.
-    // dedupeConsecutiveRows collapses back-to-back identical display rows
-    // (D1 fix 1) — e.g. the |switch| + |-switch| pair that both read
+    // collapseDoubleEmit (S2) first drops the sim's absolute total-HP
+    // twin of each health change, keeping the scaled-to-100 ratio line;
+    // dedupeConsecutiveRows then collapses back-to-back identical display
+    // rows (D1 fix 1) — e.g. the |switch| + |-switch| pair that both read
     // "X went on the field!", which the service ships as two lines.
     const rows = dedupeConsecutiveRows(
-        (log || []).filter(isDisplayLogLine).map(parseLogLine),
+        collapseDoubleEmit(
+            (log || []).filter(isDisplayLogLine),
+        ).map(parseLogLine),
     );
     const count = rows.length;
 
