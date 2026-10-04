@@ -6,7 +6,7 @@ import { startBattle, sendChoice, getBattleState } from "../utils/simService";
 import { getRecordsForSpecies } from "../utils/showdownData";
 import { loadDexMap } from "../utils/battleSprites";
 import { isDisplayLogLine, parseLogLine, reconcileLog } from "../utils/battleLog";
-import { fxEvents, fxClass, fxDuration } from "../utils/battleFx";
+import { fxEvents, fxClassFor, fxDuration, fxWindow, CSS_CLASS_DURATIONS } from "../utils/battleFx";
 import {
     isDoublesFormat, moveNeedsTarget, doublesTargetOptions,
     targetLocSuffix, doublesSecondLead,
@@ -58,6 +58,17 @@ export default function BattlePage() {
     const [leadIndex, setLeadIndex] = useState(null);
     const [benchOpen, setBenchOpen] = useState(false);
     const [busy, setBusy] = useState(false);
+    // S3: the FX resolve window — while the turn's choreography (the enemy's
+    // attack/hit/faint) is still playing out after `busy` cleared, the
+    // controls stay gated on this instead of re-arming instantly. A hard
+    // setTimeout (fxWindow's capped sum) releases it, so a stuck FX timer
+    // can never wedge input.
+    const [fxLock, setFxLock] = useState(false);
+    const fxLockTimerRef = useRef(null);
+    // S3: the FX resolve window the LAST applied envelope queued, armed when
+    // the POST round-trip (busy) clears — so the gate runs AFTER the spinner,
+    // never under it (a commit-time timer would expire inside the busy phase).
+    const pendingFxWindowRef = useRef(0);
     const [errorInfo, setErrorInfo] = useState(null);
     const [toast, setToast] = useState(null);
     // P4 (doubles move targeting): the move currently awaiting a target pick.
@@ -143,7 +154,10 @@ export default function BattlePage() {
     useEffect(() => { logRef.current = log; }, [log]);
     // Clean up any still-pending FX removals on unmount (a battle can end
     // while a window is open; timers must not fire on dead refs).
-    useEffect(() => () => { pendingFxRef.current.forEach(clearTimeout); }, []);
+    useEffect(() => () => {
+        pendingFxRef.current.forEach(clearTimeout);
+        clearTimeout(fxLockTimerRef.current);
+    }, []);
     // Q2: leaving the page (abandon/close) stops the BGM — no lingering loop.
     useEffect(() => () => { battleAudio.stopBattleMusic(); }, []);
     // Dev-only QA bridge (the __d3sched pattern): expose the controller's live
@@ -174,25 +188,40 @@ export default function BattlePage() {
         if (typeof window !== "undefined" && window.__q2audio) window.__q2audio.push(what);
     }, []);
     const playEvent = useCallback((ev) => {
-        // The D3 choreography staggers events on the same beat; schedule the
-        // audio at the same offsets so sound and CSS land together.
-        const scheduleAt = (fn, ms) => {
-            if (ms) setTimeout(fn, ms);
-            else fn();
+        // The D3 choreography staggers events on the same beat. Q2: audio must
+        // not gate animation — the synthesized SFX fire at the SAME offset the
+        // CSS class lands, so sound and motion stay together.
+        //
+        // S3: EVERY event kind now mounts its one-shot CSS class on the plate
+        // (the enemy's attack is the side-variant bs-attack-foe; your plate
+        // taking the hit is bs-hit-red) IN ADDITION to its SFX. The original
+        // audio-only early-returns left the attack/hit/faint CSS states
+        // unmounted, so the enemy's beat had no visible lunge/hit — the exact
+        // "no visual feedback on the enemy attack" symptom this card fixes.
+        const fireAudio = () => {
+            if (ev.kind === "attack") { logAudio("sfx:attack"); battleAudio.playHit("attack"); }
+            else if (ev.kind === "hit") { logAudio("sfx:hit"); battleAudio.playHit("impact"); }
+            else if (ev.kind === "faint") { logAudio("sfx:faint"); battleAudio.playFaint(); }
         };
-        if (ev.kind === "attack") { scheduleAt(() => { logAudio("sfx:attack"); battleAudio.playHit("attack"); }, ev.offset); return; }
-        if (ev.kind === "hit") { scheduleAt(() => { logAudio("sfx:hit"); battleAudio.playHit("impact"); }, ev.offset); return; }
-        if (ev.kind === "faint") { scheduleAt(() => { logAudio("sfx:faint"); battleAudio.playFaint(); }, ev.offset); return; }
-        const cls = fxClass(ev.kind);
+        // The side-aware class the page actually adds: the foe's attack lunge is
+        // bs-attack-foe (deeper travel + red flash), YOUR plate taking the hit
+        // is bs-hit-red (red-50 flicker + shake) — distinct from your own
+        // attack / the foe's hit so the enemy beat reads as its own action.
+        const cls = fxClassFor(ev.kind, ev.side);
+        // The removal timer matches the CLASS's own CSS duration
+        // (CSS_CLASS_DURATIONS), not the kind's — the side-variants differ.
+        const clsMs = CSS_CLASS_DURATIONS[cls] ?? fxDuration(ev.kind);
         const fire = () => {
+            fireAudio();
             const target = ev.kind === "status"
                 ? (ev.side === "foe" ? foeChipRef.current : yourChipRef.current)
                 : (ev.side === "foe" ? foePlateRef.current : yourPlateRef.current);
-            if (!target) return;
-            target.classList.add(cls);
-            pendingFxRef.current.push(
-                setTimeout(() => target.classList.remove(cls), fxDuration(ev.kind)),
-            );
+            if (target) {
+                target.classList.add(cls);
+                pendingFxRef.current.push(
+                    setTimeout(() => target.classList.remove(cls), clsMs),
+                );
+            }
         };
         const run = () => {
             if (ev.kind === "turnPulse") {
@@ -249,7 +278,33 @@ export default function BattlePage() {
             }
         }
         for (const ev of events) playEvent(ev);
+        // S3: hand the queue back to applyEnvelope so the input gate
+        // (fxLock) can be armed with this turn's resolve window (fxWindow).
+        return events;
     }, [playEvent]);
+
+    // S3 — the input gate. `busy` covers the POST round-trip; once it clears,
+    // the SAME envelope's choreography (your attack -> the FOE's attack @200 ->
+    // your hit -> faints) is still playing. fxLock holds the controls for
+    // exactly that window so the enemy visibly acts before the turn re-arms.
+    // The timer is the safety net: a stuck/missed FX timer can never wedge
+    // input — it re-arms at the hard cap (fxWindow <= MAX_FX_WINDOW_MS).
+    const releaseFxLock = useCallback(() => {
+        clearTimeout(fxLockTimerRef.current);
+        fxLockTimerRef.current = null;
+        setFxLock(false);
+    }, []);
+    // Arm the gate for `ms` (the already-computed, capped FX window). Called
+    // from submitChoice's `finally`, i.e. the moment `busy` clears.
+    const armFxLock = useCallback((ms) => {
+        releaseFxLock();
+        if (ms <= 0) return;
+        setFxLock(true);
+        fxLockTimerRef.current = setTimeout(() => {
+            fxLockTimerRef.current = null;
+            setFxLock(false);
+        }, ms);
+    }, [releaseFxLock]);
 
     // Q2: switch-in cries are diffed at the ENVELOPE level (not via the D3
     // switch-in event, which suppresses the very first lead appearance on
@@ -380,6 +435,11 @@ export default function BattlePage() {
             pendingCriesRef.current = [];
             pendingFxRef.current.forEach(clearTimeout);
             pendingFxRef.current = [];
+            // S3: a fresh battle clears the in-flight resolve window — the
+            // previous battle's fxLock/pending timer must not bleed into the
+            // new room.
+            pendingFxWindowRef.current = 0;
+            releaseFxLock();
             // The first envelope's state is "teampreview" (C2 §3.1) — the
             // lead-pick step; an already-over battle skips straight to end.
             setPhase(res.envelope.battleOver ? "over" : "preview");
@@ -387,7 +447,7 @@ export default function BattlePage() {
         } finally {
             startingRef.current = false;
         }
-    }, [format, team]);
+    }, [format, team, releaseFxLock]);
 
     useEffect(() => {
         // Defer both paths off the effect body (no synchronous setState here):
@@ -422,10 +482,19 @@ export default function BattlePage() {
                                   // in flight must never diff against stale tails)
         setLog(nextLog);
         const newLines = nextLog.slice(preLog.length);
-        scheduleFx(env, newLines);
+        const cr = env.choiceRequest || {};
+        // S3: record this turn's FX resolve window so the input gate
+        // (fxLock) can be armed when the POST round-trip (busy) CLEARS —
+        // arming at commit would run the timer under the busy spinner and
+        // expire before the user ever sees the "…". Only a user-decision
+        // turn (move/switch) queues a gate; a resync / not-your-turn /
+        // battle-over envelope does not.
+        const fxQueue = scheduleFx(env, newLines);
+        pendingFxWindowRef.current = !env.battleOver && (cr.state === "move" || cr.state === "switch")
+            ? fxWindow(fxQueue)
+            : 0;
         playSwitchInCries(env);
         prevEnvRef.current = env;
-        const cr = env.choiceRequest || {};
         // A new foe can appear (switch on the opposing side) — widen the lane.
         // P4 (doubles): there are TWO foes (env.foes[]), so widen on every
         // visible foe species; singles is the single env.foe. Widen only on
@@ -452,7 +521,10 @@ export default function BattlePage() {
     }, [scheduleFx, playSwitchInCries]);
 
     const submitChoice = useCallback(async (choice) => {
-        if (busy || !battleId) return;
+        // S3: the FX resolve window (fxLock) holds input after the POST
+        // resolves, so the enemy's choreography plays out before the next
+        // choice can fire. `busy` alone no longer re-arms the controls.
+        if (busy || fxLock || !battleId) return;
         setBusy(true);
         setBenchOpen(false);
         try {
@@ -488,8 +560,15 @@ export default function BattlePage() {
             }
         } finally {
             setBusy(false);
+            // S3: busy is now clear — arm the queued FX resolve window. The
+            // last applyEnvelope computed it (0 for non-decision envelopes /
+            // battle-over), so a plain resync never re-arms the gate. The
+            // timer is hard-capped (fxWindow <= MAX_FX_WINDOW_MS), so a stuck
+            // FX path can never wedge input.
+            armFxLock(pendingFxWindowRef.current);
+            pendingFxWindowRef.current = 0;
         }
-    }, [battleId, busy, applyEnvelope, showToast]);
+    }, [battleId, busy, fxLock, applyEnvelope, showToast, armFxLock]);
 
     // Q2: the post-gesture BGM start. `unlock()` resumes the AudioContext
     // (the user gesture that un-locks autoplay); `startBattleMusic()` opens
@@ -647,6 +726,10 @@ export default function BattlePage() {
     const turnLabel = (() => {
         if (phase !== "battle" && phase !== "over") return "";
         if (busy) return "…";
+        // S3: the FX resolve window — the enemy's choreography is still
+        // playing out, the pill reads "…" (resolving) instead of re-arming
+        // to the next prompt before the user has seen the foe act.
+        if (fxLock) return "…";
         switch (state) {
             case "move": return "Your move";
             case "switch": return "Choose a replacement";
@@ -656,9 +739,16 @@ export default function BattlePage() {
         }
     })();
 
+    // S3: the controls re-arm only when BOTH the POST round-trip (busy) and
+    // the FX resolve window (fxLock) are clear — the enemy's choreography must
+    // play out before the next input is accepted.
+    const inputGated = busy || fxLock;
     // The bench is switchable in the forced-switch state (OD-9: switch-only
     // controls) or when the user opened the voluntary switch (C1 §3.2).
-    const benchSwitchable = state === "switch" || (state === "move" && benchOpen);
+    // S3: never switchable while the POST is in flight OR the FX resolve
+    // window is open — the foe's choreography plays out first.
+    const benchSwitchable =
+        (state === "switch" || (state === "move" && benchOpen)) && !inputGated;
     const movesDisabledByState = state === "switch" || state === "over" || state === "wait";
 
     const headerTitle =
@@ -693,7 +783,7 @@ export default function BattlePage() {
                     move={targetOptions.move}
                     targetCount={targetOptions.options.filter((o) => !o.disabled).length}
                     onCancel={cancelTargeting}
-                    busy={busy}
+                    busy={busy || fxLock}
                 />
             )}
             {/* Moves: 2×2 grid (C1 §3.2). P4: in doubles a target-needing move
@@ -716,7 +806,7 @@ export default function BattlePage() {
                             key={move.id}
                             move={move}
                             moveMeta={moveMeta}
-                            busy={busy || (isPending && !!targetOptions)}
+                            busy={inputGated || (isPending && !!targetOptions)}
                             disabledByState={movesDisabledByState}
                             onMove={commitMove}
                             foe={withMeta(foeMon)}
@@ -724,7 +814,7 @@ export default function BattlePage() {
                         />
                     );
                 })}
-                {(cr?.legalMoves || []).length === 0 && !busy && (
+                {(cr?.legalMoves || []).length === 0 && !inputGated && (
                     <p className="col-span-2 text-sm text-neutral-500">No moves available</p>
                 )}
             </div>
@@ -733,7 +823,7 @@ export default function BattlePage() {
             <div className="mt-3 flex">
                 <SwitchButton
                     active={benchOpen}
-                    busy={busy || state !== "move"}
+                    busy={inputGated || state !== "move"}
                     canSwitch={!!cr?.canSwitch}
                     reason={cr?.reason || ""}
                     trapped={!!cr?.trapped}
@@ -897,7 +987,17 @@ export default function BattlePage() {
                                     ) : null}
                                     <span
                                         ref={pillRef}
-                                        className="rounded-full bg-blue-800 px-3 py-1 text-xs font-semibold text-white"
+                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                            // S3: the fxLock "resolving" look — no
+                                            // spinner (nothing is in flight; the enemy's
+                                            // choreography is playing out), the pill is a
+                                            // muted slate + its label reads "…", so the
+                                            // state is perceptibly DISTINCT from the
+                                            // busy spinner.
+                                            busy || fxLock
+                                                ? "bg-neutral-500 text-white"
+                                                : "bg-blue-800 text-white"
+                                        }`}
                                     >
                                         Turn {choiceCount}
                                     </span>

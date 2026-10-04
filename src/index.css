@@ -53,6 +53,57 @@
     animation: bs-hit-flicker 150ms linear 1;
 }
 
+/* S3 — enemy-side distinct reads: the enemy's attack + YOUR plate's hit use
+   side-variant classes so the two beats are visually separate (the enemy
+   "acts" before control returns to the user; the plain bs-attack/bs-hit
+   above stay YOUR attack / the FOE plate's hit).
+   - bs-attack-foe — foe plate lunge: a deeper 8px travel + a red-600 flash
+     on the foe sprite box (vs your white flash), 260ms (20ms longer than
+     your lunge so the enemy beat reads as the heavier one).
+   - bs-hit-red    — your plate taking the hit: the same ±3px shake, but the
+     sprite-box flicker is RED-50 -> white (vs the blue-50 base flicker) and
+     the plate gets a 4px knockback toward YOU (translateX with --bs-dir, so
+     yours pushes -x while the base class is direction-neutral).
+   Both are one-shot add/remove toggles, same scheduler as the base states. */
+@keyframes bs-attack-foe {
+    0%   { transform: translateX(0); }
+    40%  { transform: translateX(calc(8px * var(--bs-dir, 1))); }
+    100% { transform: translateX(0); }
+}
+@keyframes bs-attack-foe-flash {
+    0%   { filter: none; }
+    50%  { filter: brightness(2.5) saturate(0) drop-shadow(0 0 3px #dc2626); }
+    100% { filter: none; }
+}
+.bs-attack-foe {
+    animation: bs-attack-foe 260ms ease-in-out 1;
+}
+.bs-attack-foe > .bs-sprite-box {
+    animation: bs-attack-foe-flash 140ms linear 1 60ms;
+}
+@keyframes bs-hit-red-flicker {
+    0%   { background-color: #fef2f2; }
+    33%  { background-color: #ffffff; }
+    66%  { background-color: #fef2f2; }
+    83%  { background-color: #ffffff; }
+    100% { background-color: #fef2f2; }
+}
+/* Same ±3px shake as the base bs-hit-shake (direction-neutral); the red-50
+   flicker on the sprite box is what reads "you took the enemy's hit". */
+@keyframes bs-hit-red-knock {
+    0%   { transform: translateX(0); }
+    25%  { transform: translateX(-3px); }
+    50%  { transform: translateX(3px); }
+    75%  { transform: translateX(-3px); }
+    100% { transform: translateX(0); }
+}
+.bs-hit-red {
+    animation: bs-hit-red-knock 150ms ease-in-out 1;
+}
+.bs-hit-red > .bs-sprite-box {
+    animation: bs-hit-red-flicker 150ms linear 1;
+}
+
 /* bs-switch-in — the incoming plate (keyed, so it is a fresh mount):
    opacity 0->1, 8px rise (yours down-to-up; the foe's row is mirrored
    via its inline direction, so the same -8px start reads upward for
@@ -127,7 +178,11 @@
     .bs-turn-pulse-plate,
     .bs-status,
     .bs-attack > .bs-sprite-box,
-    .bs-hit > .bs-sprite-box {
+    .bs-hit > .bs-sprite-box,
+    .bs-attack-foe,
+    .bs-hit-red,
+    .bs-attack-foe > .bs-sprite-box,
+    .bs-hit-red > .bs-sprite-box {
         animation-duration: 0s !important;
     }
     /* HP drain: instant. The fill is the ONLY element carrying the

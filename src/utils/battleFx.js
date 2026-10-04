@@ -16,7 +16,9 @@ import { parseCondition } from "./battleLog.js";
 // on HpBar's fill, which fires on its own when the new width renders.
 export const BS_DURATIONS = {
     attack: 200,
+    "attack-foe": 260,
     hit: 150,
+    "hit-red": 150,
     "switch-in": 300,
     faint: 300,
     "turn-pulse": 200,
@@ -24,6 +26,9 @@ export const BS_DURATIONS = {
 };
 
 // Event kind -> the `bs-*` class suffix (the page adds `bs-<suffix>`).
+// The enemy's side-variant states (bs-attack-foe / bs-hit-red) are NOT
+// separate kinds — the diff still emits kind "attack"/"hit" + `side`, and the
+// page picks the variant class by side (playEvent). fxClass maps the base.
 const FX_CLASS = {
     turnPulse: "turn-pulse",
     attack: "attack",
@@ -42,6 +47,25 @@ export function fxClass(kind) {
 }
 
 /**
+ * S3: the one-shot class the page ACTUALLY adds for an event — the enemy
+ * reads distinct from your own side:
+ *   - the FOE's attack lunge is `bs-attack-foe` (deeper travel + red flash,
+ *     longer beat) instead of the base `bs-attack`,
+ *   - YOUR plate taking the hit is `bs-hit-red` (red-50 flicker + knockback)
+ *     instead of the base `bs-hit` (blue-50 flicker on the foe's plate).
+ * Everything else mounts the base class.
+ *
+ * @param {string} kind an fxEvents event kind.
+ * @param {string} [side] "yours" | "foe" (the plate that mounts the class).
+ * @returns {string} the `bs-*` class name to toggle.
+ */
+export function fxClassFor(kind, side) {
+    if (kind === "attack" && side === "foe") return "bs-attack-foe";
+    if (kind === "hit" && side === "yours") return "bs-hit-red";
+    return fxClass(kind);
+}
+
+/**
  * The CSS duration (ms) of an event's one-shot class (spec §2.1 table).
  * @param {string} kind an fxEvents event kind.
  * @returns {number} ms until the class may be removed.
@@ -50,6 +74,36 @@ export function fxDuration(kind) {
     const key = kind === "switchIn" ? "switch-in" : kind === "turnPulse" ? "turn-pulse" : kind;
     return BS_DURATIONS[key] ?? 300;
 }
+
+// ---------------------------------------------------------------------------
+// S3 — the FX resolve window (docs/battle-scene-spec.md §2.1 choreography).
+//
+// The page's one-shot classes are plain CSS animations driven by keyframe
+// declarations in index.css (the bs-* block); the page-side scheduler needs
+// the EFFECTIVE duration without waiting for animations to finish, so this
+// table mirrors the index.css `animation:` shorthands that carry each keyframe
+// (including the S3-extended bs-attack-foe). battleFx.test.js asserts every
+// entry against the index.css source, so a CSS retiming fails CI instead of
+// silently desyncing the input gate.
+export const CSS_CLASS_DURATIONS = {
+    "bs-attack": 200,
+    "bs-attack-foe": 260,
+    "bs-hit": 150,
+    "bs-hit-red": 150,
+    "bs-switch-in": 300,
+    "bs-faint": 300,
+    "bs-turn-pulse": 200,
+    "bs-turn-pulse-plate": 200,
+    "bs-status": 300,
+};
+
+// S3: settle after the last FX lands before input re-arms (spec §2.1 window
+// + a short tail so the final hit drain + faint read as finished).
+export const FX_SETTLE_MS = 300;
+
+// S3: hard cap on the resolve window (the choreography sum + settle, see
+// fxWindow) — a stuck timer must never wedge the controls.
+export const MAX_FX_WINDOW_MS = 1500;
 
 const uniq = (xs) => [...new Set(xs)];
 
@@ -176,4 +230,35 @@ export function fxEvents(prev, env, newLines) {
     }
 
     return events;
+}
+
+/**
+ * The input-gate resolve window for a scheduled FX queue (S3): the moment
+ * `busy` may release, the controls hold for this many ms so the enemy-side
+ * choreography (lunge, hit, faint) visibly plays out before the next turn
+ * re-arms — the spec §2.1 window measured from the commit (the rAF hop of a
+ * frame is absorbed by the settle tail).
+ *
+ * `events` shape: the fxEvents() queue ({kind, side?, offset}). A foe
+ * attack pair is the longest beat (attack 200ms @200 -> hit 150ms @350);
+ * the settle tail covers the final hit's HP drain tail + the faint read.
+ *
+ * @param {Array<{kind:string, side?:string, offset:number}>|null|undefined} events
+ * @returns {number} ms to hold input (0 = nothing scheduled, re-arm now);
+ *   always <= MAX_FX_WINDOW_MS (a stuck timer can never wedge the UI).
+ */
+export function fxWindow(events) {
+    const list = Array.isArray(events) ? events.filter((ev) => ev && ev.kind) : [];
+    if (list.length === 0) return 0;
+    // The effective CSS duration of the event's one-shot class (CSS_CLASS_DURATIONS
+    // mirrors the index.css `animation:` shorthands; fxDuration is the JS-only
+    // fallback when a class is unknown). Side-aware so the enemy's longer
+    // attack-foe beat is counted, not the base 200ms.
+    const durOf = (ev) =>
+        CSS_CLASS_DURATIONS[fxClassFor(ev.kind, ev.side)] ?? fxDuration(ev.kind);
+    let end = 0;
+    for (const ev of list) {
+        end = Math.max(end, ev.offset + durOf(ev));
+    }
+    return Math.min(MAX_FX_WINDOW_MS, end + FX_SETTLE_MS);
 }
